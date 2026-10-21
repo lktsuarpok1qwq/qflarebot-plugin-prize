@@ -2,7 +2,7 @@ import { eventKey } from '../storage/events.js';
 import type { Session } from '@qqbot/sdk';
 import type { Ctx, Draw, DrawBody, Kind, Meta, Pool, Rules } from '../contracts.js';
 import { MINUTE, SOURCE } from '../contracts.js';
-import { atomic, beijing, ensure, failure, LIVE, NOW, shortNumber, sql } from '../storage/db.js';
+import { atomic, beijing, ensure, failure, LIVE, NOW, sql } from '../storage/db.js';
 import { prepareDebit, wallet } from '../points/operations.js';
 import { access } from '../access.js';
 import { validateRules } from './rules.js';
@@ -30,7 +30,7 @@ export async function admit(ctx: Ctx, session: Session, kind: Kind, poolId: stri
 
     const control = await access(ctx, options.control);
     const id = crypto.randomUUID();
-    const short = shortNumber('D', id);
+    const short = 'D' + id.replaceAll('-', '');
     const created = Date.now();
     const pool = await ctx.db.first<Pool>('SELECT * FROM {pools} WHERE bot_id=? AND id=?', ctx.botId, poolId);
     let rules: Rules;

@@ -1,5 +1,5 @@
 import type { Ctx, Draw, Prize } from '../contracts.js';
-import { atomic, body, draw, ensure, fence, isConflict, patchDraw, save, shortNumber, sql } from '../storage/db.js';
+import { atomic, body, draw, ensure, fence, isConflict, patchDraw, save, sql } from '../storage/db.js';
 import { choose } from './rules.js';
 import { SOURCE } from '../contracts.js';
 
@@ -54,7 +54,7 @@ export async function fixResult(ctx: Ctx, row: Draw): Promise<Draw> {
             ctx.botId, goods.prizeId));
         writes.push(sql('UPDATE {pools} SET inventory_revision=inventory_revision+1 WHERE bot_id=? AND id=?', ctx.botId, row.pool_id));
         writes.push(sql(`INSERT INTO {claims}(bot_id,id,short_id,draw_id,user_id,pool_id,prize_id,award,state,stock_state)
-            VALUES(?,?,?,?,?,?,?,?,'LOCKED','RESERVED')`, ctx.botId, claimId, shortNumber('P', claimId), row.id,
+            VALUES(?,?,?,?,?,?,?,?,'LOCKED','RESERVED')`, ctx.botId, claimId, 'P' + claimId.replaceAll('-', ''), row.id,
             row.user_id, row.pool_id, goods.prizeId, JSON.stringify(goods)));
     }
 

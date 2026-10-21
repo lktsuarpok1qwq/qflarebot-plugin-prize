@@ -16,7 +16,7 @@ function renderActivities(tab) {
         const cover = node('span', undefined, 'activity-cover');
         const top = node('span', undefined, 'activity-top');
         top.append(node('span', '奖池'), node('span', activityStates[pool.state], 'badge'));
-        const price = node('span', (r.cost / 100).toFixed(2), 'activity-price');
+        const price = node('span', formatMoney(r.cost), 'activity-price');
         price.append(node('small', '积分 / ' + '次'));
         cover.append(top, node('h3', r.name, 'activity-name'), price);
         const body = node('span', undefined, 'activity-body');

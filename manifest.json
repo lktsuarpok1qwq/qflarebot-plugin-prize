@@ -13,7 +13,7 @@
   "commands": [
     {
       "name": "抽奖",
-      "description": "查看奖池、抽奖、概率及本人记录",
+      "description": "查看奖池、抽奖、奖项及本人记录",
       "scenes": [
         "group",
         "c2c"

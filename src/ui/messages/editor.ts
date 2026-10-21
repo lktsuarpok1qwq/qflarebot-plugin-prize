@@ -118,7 +118,7 @@ const messageEditor = (() => {
             }
 
             restoreImages();
-            $('reply-preview-notice').textContent = model.mode === 'layout' ? '当前正文，变量保持原样' : field.fragment && !$('reply-preview-text').querySelector('mark,.sample-highlight') ? '此片段为空或当前完整消息未引用它' : '固定示例，仅预览，不发送消息';
+            $('reply-preview-notice').textContent = model.mode === 'layout' ? '当前正文，变量保持原样' : field.fragment && !$('reply-preview-text').querySelector('mark,.sample-highlight') ? '此片段为空或当前完整消息未引用它' : dirty(model) ? '预览当前草稿，保存后用于发送；数据为固定示例' : '预览已保存模板；示例值会由实际数据替换';
         } catch (error) {
             $('reply-preview-text').textContent = error.message;
             $('reply-preview-buttons').replaceChildren();

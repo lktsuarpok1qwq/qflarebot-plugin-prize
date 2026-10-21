@@ -1,4 +1,4 @@
-import { shortNumber } from '../storage/db.js';
+import { money } from '../lottery/rules.js';
 import { OPEN_END } from '../contracts.js';
 import { runtime } from './runtime.js';
 import { editor } from './editor.js';
@@ -74,12 +74,12 @@ ${messagesHTML}
 <label class="check wide"><input id="timeEnabled" type="checkbox">启用时间限制</label><label>开始时间（北京时间）<input id="starts" type="datetime-local" disabled></label><label>结束时间（北京时间）<input id="ends" type="datetime-local" disabled></label>
 <div class="wide muted">启用后可编辑时间，留空的一端不限制；活动仍需手动开放</div></div><details id="moreRules"><summary>更多参与规则</summary><div class="grid"><label>活动总次数（0 不限）<input id="totalLimit" type="number" min="0" value="0" required></label><label>每人总次数（0 不限）<input id="userLimit" type="number" min="0" value="0" required></label><label>每人每日次数（0 不限）<input id="dailyLimit" type="number" min="0" value="0" required></label>
 <label>重复中奖<select id="repeat"><option value="ALLOW">允许重复中奖</option><option value="ONCE_PER_POOL">每人最多中奖一次</option></select></label></div></details>
-<details><summary>活动编号</summary><code id="poolCode"></code></details><div class="row"><h3>奖项</h3><button type="button" id="loadProducts">加载商品选项</button></div><div class="muted">公开标签用于群内概率说明，请勿填写内部商品名称或敏感内容</div><div id="awards"></div><button type="button" id="addAward">添加奖项</button><div id="probability" class="muted"></div>
+<details><summary>活动编号</summary><code id="poolCode"></code></details><div class="row"><h3>奖项</h3><button type="button" id="loadProducts">加载商品选项</button></div><div class="muted">奖项一览会展示标签、积分奖励或奖品名称，请勿在名称中填写交付秘密</div><div id="awards"></div><button type="button" id="addAward">添加奖项</button><div id="probability" class="muted"></div>
 <div class="dirty" id="ruleDirty"></div><div class="actions"><button class="primary" id="saveRules" disabled>保存规则</button><button type="button" id="resetRules" disabled>撤销修改</button><button type="button" id="copyPool">复制为新草稿</button></div></form>
 <div class="actions" id="poolStates"><button data-state="ACTIVE">开放 / 恢复</button><button data-state="PAUSED">暂停</button><details><summary>更多操作</summary><button data-state="CLOSED" class="danger">关闭活动</button><button data-state="ARCHIVED" class="danger">归档活动</button></details></div></div>
 </template><dialog id="stockAdjustDialog" aria-labelledby="stockAdjustTitle"><h2 id="stockAdjustTitle">调整库存</h2><div id="stockAdjustSummary" class="muted"></div><div id="stockAdjustPending" hidden><p class="muted">结果尚未确认，请核对原操作</p><div class="row"><button type="button" id="verifyStockAdjustment">核对原操作</button><button type="button" id="retryStockAdjustment">重试原操作</button></div></div><form id="stockAdjustForm"><div class="grid"><label>操作<select id="stockMode"><option value="ADD">补货</option><option value="RETIRE">减少可用库存</option></select></label><label>数量<input id="stockAdjustAmount" type="number" min="1" max="1000000" step="1" required></label></div><p id="stockAdjustPreview" class="change-preview" aria-live="polite">请输入调整数量</p><div class="actions"><button type="button" id="closeStockAdjust">取消</button><button id="saveStockAdjust" class="primary">确认调整</button></div></form></dialog><div id="toasts" aria-live="polite"></div><dialog id="confirm" aria-labelledby="confirmTitle" aria-describedby="confirmBody"><h2 id="confirmTitle">确认操作</h2><p id="confirmBody"></p><div class="actions"><button id="confirmCancel" autofocus>取消</button><button id="confirmYes" class="primary">确认</button></div></dialog>
 <script type="module">
-${"const shortNumber = " + shortNumber.toString() + ";"}
+${"const formatMoney = " + money.toString() + ";"}
 ${runtime}
 ${settingsUI}
 ${editor}

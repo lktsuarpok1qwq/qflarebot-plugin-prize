@@ -6,7 +6,7 @@ export interface TemplateField {
     text: string;
     variables: string[];
     required: string[];
-    fragment?: { message: string; variable: string; when?: string; also?: Array<{ message: string; variable: string }> };
+    fragment?: { message: string; variable: string; when?: string; separator?: string; also?: Array<{ message: string; variable: string }> };
     actions?: string[];
     requiredActions?: string[];
     defaultActions?: string[];
@@ -19,12 +19,12 @@ const field = (title: string, group: string, text: string, variables: string[] =
 function lottery(): Record<string, TemplateField> {
     return {
         help: field('使用帮助', '入口', '🎟️ **奖池抽奖**\n\n选择奖池后购买，自动扣款并开奖\n\n⌨️ {{command}} 抽 <奖池ID>', ['command']),
-        activities: field('活动列表', '入口', '🎟️ **奖池**\n\n{{notice}}{{items}}', ['items', 'notice', 'nextCommand']),
-        activityItem: field('单个活动', '入口', '🎟️ **{{name}}**\n\n💰 每次 {{cost}} 积分\n\n[🛒 购买]({{purchaseUrl}})　[📊 概率]({{probabilityUrl}})', ['name', 'cost', 'purchaseCommand', 'purchaseUrl', 'probabilityUrl'], [], { message: 'activities', variable: 'items' }),
+        activities: field('活动列表', '入口', '🎰 **奖池列表**\n\n{{notice}}{{items}}', ['items', 'notice', 'nextCommand']),
+        activityItem: field('单个活动', '入口', '🎟️ **{{name}}**\n\n💰 每次 {{cost}} 积分\n\n[🛒 购买]({{purchaseUrl}})　[🏆 奖项]({{probabilityUrl}})', ['name', 'cost', 'purchaseCommand', 'purchaseUrl', 'probabilityUrl'], [], { message: 'activities', variable: 'items' }),
         noActivities: field('暂无活动', '入口', '🌙 暂无开放活动', [], [], { message: 'activities', variable: 'items', when: 'empty' }),
-        probability: field('当前概率', '概率', '📊 **{{name}}**\n\n💰 每次 {{cost}} 积分\n\n{{items}}\n\nℹ️ 库存变化会影响概率', ['name', 'cost', 'state', 'items', 'time']),
-        probabilityItem: field('单个奖项概率', '概率', '🎁 {{label}} · {{probability}}%', ['label', 'probability'], [], { message: 'probability', variable: 'items' }),
-        noCandidates: field('暂无有效奖项', '概率', '🌙 暂无有效奖项', [], [], { message: 'probability', variable: 'items', when: 'empty' }),
+        probability: field('奖项一览', '奖项一览', '🏆 **{{name}} · 奖项一览**\n\n💰 每次 {{cost}} 积分\n\n{{items}}\n\nℹ️ 库存变化会影响概率', ['name', 'cost', 'state', 'items', 'time']),
+        probabilityItem: field('单个奖项', '奖项一览', '{{icon}} **{{label}}**\n\n🎁 奖励：{{reward}}\n\n🎲 概率：{{probability}}%', ['label', 'probability', 'reward', 'icon'], [], { message: 'probability', variable: 'items', separator: '\n\n***\n\n' }),
+        noCandidates: field('暂无有效奖项', '奖项一览', '🌙 暂无有效奖项', [], [], { message: 'probability', variable: 'items', when: 'empty' }),
         pending: field('处理中', '购买结果', '⏳ **{{state}}**\n\n本笔购买已记录，请勿重复购买\n\n🔎 [结果]({{continueUrl}})\n\n🧾 {{id}}', ['state', 'id', 'continueCommand', 'continueUrl'], [], undefined, ['continue']),
         refunded: field('购买退款', '购买结果', '↩️ **购买已取消，积分已退回**\n\n🧾 {{id}}', ['id']),
         settled: field('积分结果', '购买结果', '{{earnings}}\n\n💰 花费 {{cost}} 积分\n📈 净变化 {{net}} 积分\n\n🧾 {{id}}', ['earnings', 'cost', 'net', 'id']),
@@ -33,7 +33,7 @@ function lottery(): Record<string, TemplateField> {
         goodsWon: field('商品中奖', '购买结果', '🎁 **获得 {{name}}**\n\n📌 {{state}}\n\n{{instructions}}', ['name', 'prizeCommand', 'state', 'instructions'], []),
         records: field('本人业务记录', '记录', '📜 **抽奖记录**\n\n{{items}}', ['items', 'nextCommand'], [], undefined, ['next']),
         recordItem: field('单笔业务记录', '记录', '📌 {{state}}\n\n💰 花费 {{cost}} 积分 · {{outcome}}\n🔎 [结果]({{continueUrl}})\n🧾 {{id}}', ['id', 'state', 'cost', 'outcome', 'continueUrl'], [], { message: 'records', variable: 'items' }),
-        recordReward: field('记录积分说明', '记录', '🪙 奖励 {{reward}}', ['reward'], [], { message: 'recordItem', variable: 'outcome' }),
+        recordReward: field('积分奖励说明', '奖项一览', '{{reward}} 积分', ['reward'], [], { message: 'recordItem', variable: 'outcome', also: [{ message: 'probabilityItem', variable: 'reward' }] }),
         recordPending: field('记录未完成说明', '记录', '处理中或已取消', [], [], { message: 'recordItem', variable: 'outcome', when: 'pending' }),
         recordGoods: field('记录商品中奖说明', '记录', '商品中奖', [], [], { message: 'recordItem', variable: 'outcome', when: 'goods' }),
         noRecords: field('暂无业务记录', '记录', '暂无记录', [], [], { message: 'records', variable: 'items', when: 'empty' })
@@ -60,7 +60,7 @@ export const FIELDS: Record<MessageModule, Record<string, TemplateField>> = {
     }
 };
 
-export const ACTION_LABELS: Record<string, string> = { continue: '🔎 结果', next: '下一页', pool: '🎟️ 奖池', records: '📜 记录', prizes: '🎁 奖品', history: '历史', buy: '🛒 购买', claim: '领取', details: '📝 资料', account: '开户' };
+export const ACTION_LABELS: Record<string, string> = { continue: '🔎 结果', next: '下一页', pool: '🎰 奖池', records: '📜 记录', prizes: '🎁 奖品', history: '历史', buy: '🛒 购买', claim: '领取', details: '📝 资料', account: '开户' };
 
 const actions: Partial<Record<MessageModule, Record<string, string[]>>> = {
     pool: { help: ['pool', 'records', 'prizes'], activities: ['next', 'pool', 'records', 'prizes'], probability: ['buy', 'pool', 'records'], refunded: ['pool', 'records'], settled: ['buy', 'pool', 'records', 'prizes'], goodsWon: ['claim', 'details', 'prizes', 'pool'], records: ['pool', 'prizes'] },
@@ -104,11 +104,11 @@ export const WORDS: Record<string, { title: string; text: string }> = Object.fro
 }).map(([key, text]) => [key, { title: (key.startsWith('draw_') ? '抽奖状态 · ' : key.startsWith('claim_') ? '兑奖状态 · ' : key.startsWith('pool_') ? '活动状态 · ' : '提示 · ') + text, text }]));
 
 export const VARIABLE_HELP: Record<string, string> = {
-    purchaseUrl: '该奖池的购买命令链接，包含实际前缀', probabilityUrl: '该奖池的概率命令链接', continueUrl: '原购买结果链接', detailUrl: '本人奖品详情链接', claimUrl: '该奖品的申请链接', detailsUrl: '带原奖品编号和当前版本的资料填写链接，仅填入输入框',
+    purchaseUrl: '该奖池的购买命令链接，包含实际前缀', probabilityUrl: '该奖池的奖项一览命令链接', continueUrl: '原购买结果链接', detailUrl: '本人奖品详情链接', claimUrl: '该奖品的申请链接', detailsUrl: '带原奖品编号和当前版本的资料填写链接，仅填入输入框',
     command: '本次命中的模块命令，包含实际前缀', prizeCommand: '本人私聊兑奖命令，包含实际前缀', pointsCommand: '积分命令，包含实际前缀',
-    name: '当前活动或中奖奖项名称', cost: '整笔费用或活动单价，单位积分，保留两位小数', reward: '积分奖励，保留两位小数',
-    net: '奖励减费用的净收益，可为负数', id: '本人业务或奖品编号', state: '当前状态的自定义用语',
-    label: '公开奖项标签，不含内部商品名称', probability: '当前有效百分比，不含百分号；省略小数末尾的0', time: '概率查询时刻', expires: '原申请截止时间，北京时间',
+    name: '当前活动或中奖奖项名称', cost: '整笔费用或活动单价，单位积分，最多两位小数且省略尾零', reward: '积分奖励数值；单个奖项中为奖励说明（积分或奖品名称）',
+    net: '奖励减费用的净收益，可为负数，省略小数尾零', id: '本人业务或奖品编号', state: '当前状态的自定义用语',
+    icon: '奖项类型图标：未中奖、积分、虚拟奖品或其他', label: '公开奖项标签，奖品名称单独显示，不填写交付秘密', probability: '当前有效百分比，不含百分号；省略小数末尾的0', time: '概率查询时刻', expires: '原申请截止时间，北京时间',
     detailsVersion: '当前交付资料版本，提交更正时原样携带', continueCommand: '原业务继续命令，只处理本次业务', purchaseCommand: '该活动的购买命令',
     nextCommand: '原列表下一页命令；没有后续页时为空', message: '按错误类型配置的说明', code: '稳定错误代码', action: '本次操作的自定义回执用语',
     notice: '报价变化等需要展示的提示；正常列表为空', claimAction: '该件奖品的领取链接；不可领取时为空', items: '按当前片段草稿组成的列表', earnings: '按中奖或未中奖草稿生成的说明', outcome: '按原业务结果生成的说明',

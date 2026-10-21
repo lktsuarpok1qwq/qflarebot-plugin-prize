@@ -11,7 +11,7 @@ import { ready } from '../storage/schema.js';
 import { configuration, message, piece, word } from './templates/render.js';
 import { messageContext } from './templates/settings.js';
 import { commandUrl, escapeMarkdown } from './templates/config.js';
-import type { MessageModule } from './templates/fields.js';
+import { FIELDS, type MessageModule } from './templates/fields.js';
 
 type Commands = { pool: string; prize: string; points: string };
 
@@ -42,7 +42,7 @@ function poolCard(ctx: Ctx, pool: Pool, names: Commands): string {
 
     return piece(ctx, 'pool', 'activityItem', {
         name: rules.name, cost: money(rules.cost), purchaseCommand: purchase(names, pool),
-        purchaseUrl: link(ctx, purchase(names, pool)), probabilityUrl: link(ctx, `${names.pool} 概率 ${pool.id}`)
+        purchaseUrl: link(ctx, purchase(names, pool)), probabilityUrl: link(ctx, `${names.pool} 奖项 ${pool.id}`)
     }, ['purchaseUrl', 'probabilityUrl']);
 }
 
@@ -240,7 +240,7 @@ async function lottery(input: CommandInput, names: Commands, control: Meta): Pro
         return displayDraw(ctx, await advance(ctx, row.id, 4), names);
     }
 
-    if (action === '概率') {
+    if (action === '奖项') {
         ensure(args.length === 2);
         const pool = await ctx.db.first<Pool>("SELECT * FROM {pools} WHERE bot_id=? AND id=?", ctx.botId, arg);
         ensure(pool, 'NOT_FOUND');
@@ -251,7 +251,11 @@ async function lottery(input: CommandInput, names: Commands, control: Meta): Pro
         const active = rules.awards.filter(a => !a.prizeId || stock.some(p => p.id === a.prizeId && p.available > 0));
         const total = active.reduce((n, a) => n + a.weight, 0);
 
-        const items = active.map(a => piece(ctx, module, 'probabilityItem', { label: a.label, probability: probability(a.weight, total) })).join('\n') || piece(ctx, module, 'noCandidates');
+        const items = active.map(a => piece(ctx, module, 'probabilityItem', {
+            label: a.label, probability: probability(a.weight, total),
+            icon: a.type === 'NONE' ? '🍀' : a.type === 'POINTS' ? '🪙' : a.type === 'VIRTUAL_MANUAL' ? '🎁' : '📦',
+            reward: a.prizeId ? escapeMarkdown(a.name) : piece(ctx, module, 'recordReward', { reward: money(a.reward) })
+        }, ['reward'])).join(FIELDS.pool.probabilityItem!.fragment!.separator!) || piece(ctx, module, 'noCandidates');
 
         return message(ctx, module, 'probability', { name: rules.name, cost: money(rules.cost), state: word(ctx, 'pool_' + pool.state), items, time: new Date().toISOString() }, ['items'], { buy: pool.state === 'ACTIVE' && Date.now() >= rules.starts && Date.now() < rules.ends && total > 0 ? purchase(names, pool) : '' });
     }

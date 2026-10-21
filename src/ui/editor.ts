@@ -264,7 +264,7 @@ function createRuleEditor() {
     }
 
     function blank() {
-        fillPool({ id: shortNumber('P', crypto.randomUUID()), kind: 'POOL', version: 0, state: 'DRAFT', rules: { kind: 'POOL', name: '', description: '', cost: 100, starts: 0, ends: openEnd, totalLimit: 0, userLimit: 0, dailyLimit: 0, repeat: 'ALLOW', awards: [{ id: 'none', name: '未中奖', label: '未中奖', type: 'NONE', weight: 1, reward: 0 }] } });
+        fillPool({ id: 'P' + crypto.randomUUID().replaceAll('-', ''), kind: 'POOL', version: 0, state: 'DRAFT', rules: { kind: 'POOL', name: '', description: '', cost: 100, starts: 0, ends: openEnd, totalLimit: 0, userLimit: 0, dailyLimit: 0, repeat: 'ALLOW', awards: [{ id: 'none', name: '未中奖', label: '未中奖', type: 'NONE', weight: 1, reward: 0 }] } });
     }
 
     async function choosePool(pool) {
@@ -306,7 +306,7 @@ function createRuleEditor() {
     $('resetRules').onclick = () => fillPool(draft.pool);
     $('copyPool').onclick = () => {
         const rules = ruleValue();
-        fillPool({ id: shortNumber('P', crypto.randomUUID()), kind: rules.kind, version: 0, state: 'DRAFT', rules });
+        fillPool({ id: 'P' + crypto.randomUUID().replaceAll('-', ''), kind: rules.kind, version: 0, state: 'DRAFT', rules });
         $('poolName').focus();
     };
     $('rulesForm').onsubmit = event => {

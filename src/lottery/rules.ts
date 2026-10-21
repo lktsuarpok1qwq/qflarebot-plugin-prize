@@ -80,7 +80,7 @@ function random32(): number {
 }
 
 export function money(minor: number): string {
-    return (minor / 100).toFixed(2);
+    return (minor / 100).toFixed(2).replace(/\.?0+$/, '');
 }
 
 export function probability(weight: number, total: number): string {

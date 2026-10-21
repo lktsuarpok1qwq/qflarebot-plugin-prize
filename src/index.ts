@@ -11,7 +11,7 @@ export default definePlugin({
     configSchema: { type: 'object', properties: {} },
     hooks: { onInstall: install },
     commands: {
-        '抽奖': { description: '查看奖池、抽奖、概率及本人记录', scenes: ['group', 'c2c'], handler: input => command(input, 'pool') },
+        '抽奖': { description: '查看奖池、抽奖、奖项及本人记录', scenes: ['group', 'c2c'], handler: input => command(input, 'pool') },
         '兑奖': { description: '私聊查看中奖记录与申请兑奖', scenes: ['group', 'c2c'], handler: input => command(input, 'prize') }
     },
     ui: { path: '/ui/', title: '奖品中心' }, routes,

@@ -156,7 +156,7 @@ $('retryStockAdjustment').onclick = () => run(sendPending);
 $('newStock').onclick = () => run(async () => {
     if (stockDraft.id && ($('stockName').value || $('stockAmount').value) && !await confirm('放弃当前未保存商品并重新新建？')) { return; }
 
-    stockDraft.id = shortNumber('G', crypto.randomUUID());
+    stockDraft.id = 'G' + crypto.randomUUID().replaceAll('-', '');
     stockDraft.revision++;
     $('stockForm').reset();
     $('stockId').value = stockDraft.id;
@@ -197,7 +197,7 @@ $('stockForm').onsubmit = event => {
             if (state.tab === 'stock' && !$('stockCreate').hidden) { showStockList(); }
         } else {
             // 原商品已创建；后续未保存输入保留为新的独立草稿。
-            stockDraft.id = shortNumber('G', crypto.randomUUID());
+            stockDraft.id = 'G' + crypto.randomUUID().replaceAll('-', '');
             $('stockId').value = stockDraft.id;
         }
     }));
