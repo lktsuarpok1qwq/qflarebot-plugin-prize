@@ -71,20 +71,16 @@ const messageEditor = (() => {
     }
 
     function scenarios() {
-        const model = active, field = FIELDS[model.module][model.key];
-        const choices = [['normal', '有记录']];
+        const model = active;
+        let choices;
 
-        if (field.variables.includes('nextCommand')) { choices.push(['last', '末页']); }
-
-        if (field.variables.includes('items') && Object.values(FIELDS[model.module]).some(f => f.fragment?.message === model.key && f.fragment.when === 'empty')) { choices.push(['empty', '暂无记录']); }
-
-        if (model.module === 'prize' && model.key === 'detail') { choices.push(['claimed', '已申请'], ['terminal', '已结束']); }
+        try { choices = previewText.scenarios(model.module, model.draft, model.key); } catch { choices = FIELDS[model.module][model.key].scenarios || [['normal', '默认']]; }
 
         const before = $('reply-scenario').value || model.positions.get(model.key)?.scenario;
         $('reply-scenario').replaceChildren();
         choices.forEach(([value, label]) => option($('reply-scenario'), value, label));
         $('reply-scenario').value = choices.some(([v]) => v === before) ? before : choices[0][0];
-        $('reply-scenario-field').hidden = model.mode === 'layout' || choices.length === 1;
+        $('reply-scenario-field').hidden = choices.length === 1;
     }
 
     function preview() {
@@ -211,6 +207,7 @@ const messageEditor = (() => {
         variables(field);
         buttons.draw();
         words();
+        $('reply-scenario').value = '';
         preview();
         model.rendered = true;
         const position = model.positions.get(key), body = $('reply-body');

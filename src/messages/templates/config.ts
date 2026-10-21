@@ -8,7 +8,7 @@ export interface TemplateError { field: string; target: 'text' | 'buttons' | 'wo
 export const DEFAULTS: Record<MessageModule, MessageConfiguration> = Object.fromEntries(MODULES.map(module => [module, {
     replies: Object.fromEntries(Object.entries(FIELDS[module]).map(([key, value]) => [key, value.text])),
     buttons: Object.fromEntries(Object.entries(FIELDS[module]).filter(([, field]) => !field.fragment).map(([key, field]) => [key,
-        field.actions?.length ? [field.actions.map(action => ({ action, label: ACTION_LABELS[action], enter: action !== 'details' }))] : []])),
+        (field.defaultActions ?? field.actions)?.length ? [(field.defaultActions ?? field.actions)!.map(action => ({ action, label: ACTION_LABELS[action], enter: action !== 'details' }))] : []])),
     words: module === 'common' ? Object.fromEntries(Object.entries(WORDS).map(([key, field]) => [key, field.text])) : {}
 }])) as Record<MessageModule, MessageConfiguration>;
 
@@ -96,7 +96,7 @@ export function createTemplateTools(fields: typeof FIELDS, words: typeof WORDS) 
                 }
             }
 
-            for (const action of (field.actions ?? []).filter(action => ['continue', 'next'].includes(action))) {
+            for (const action of field.requiredActions ?? []) {
                 if (rows.flat().filter(button => button.action === action).length !== 1) { return problem(key, 'buttons', '请保留且仅保留一个' + (action === 'continue' ? '原购买结果' : '原列表翻页') + '按钮'); }
             }
         }

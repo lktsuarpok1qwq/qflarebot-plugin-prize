@@ -1,4 +1,6 @@
-export const editor = String.raw`
+import { probability } from '../lottery/rules.js';
+
+export const editor = 'const formatProbability = ' + probability.toString() + ';\n' + String.raw`
 function fields(form) { return Object.fromEntries(new FormData(form).entries()); }
 
 const openEnd = Number($('content').dataset.openEnd);
@@ -262,7 +264,7 @@ function createRuleEditor() {
     }
 
     function blank() {
-        fillPool({ id: 'P' + crypto.randomUUID().replaceAll('-', ''), kind: 'POOL', version: 0, state: 'DRAFT', rules: { kind: 'POOL', name: '', description: '', cost: 100, starts: 0, ends: openEnd, totalLimit: 0, userLimit: 0, dailyLimit: 0, repeat: 'ALLOW', awards: [{ id: 'none', name: '未中奖', label: '未中奖', type: 'NONE', weight: 1, reward: 0 }] } });
+        fillPool({ id: shortNumber('P', crypto.randomUUID()), kind: 'POOL', version: 0, state: 'DRAFT', rules: { kind: 'POOL', name: '', description: '', cost: 100, starts: 0, ends: openEnd, totalLimit: 0, userLimit: 0, dailyLimit: 0, repeat: 'ALLOW', awards: [{ id: 'none', name: '未中奖', label: '未中奖', type: 'NONE', weight: 1, reward: 0 }] } });
     }
 
     async function choosePool(pool) {
@@ -298,13 +300,13 @@ function createRuleEditor() {
         try {
             const r = ruleValue();
             const total = r.awards.reduce((n, a) => n + a.weight, 0);
-            $('probability').textContent = r.awards.map(a => a.label + ' ' + (a.weight / total * 100).toFixed(4) + '%').join(' · ');
+            $('probability').textContent = r.awards.map(a => a.label + ' ' + formatProbability(a.weight, total) + '%').join(' · ');
         } catch { $('probability').textContent = '请检查金额和权重'; }
     };
     $('resetRules').onclick = () => fillPool(draft.pool);
     $('copyPool').onclick = () => {
         const rules = ruleValue();
-        fillPool({ id: 'P' + crypto.randomUUID().replaceAll('-', ''), kind: rules.kind, version: 0, state: 'DRAFT', rules });
+        fillPool({ id: shortNumber('P', crypto.randomUUID()), kind: rules.kind, version: 0, state: 'DRAFT', rules });
         $('poolName').focus();
     };
     $('rulesForm').onsubmit = event => {

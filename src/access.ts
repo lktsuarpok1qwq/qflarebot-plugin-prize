@@ -6,8 +6,8 @@ import { maintenance } from './maintenance.js';
 
 export const requiredPermissions = ['burn', 'reverseOwn'];
 
-export async function access(ctx: Ctx): Promise<Meta> {
-    let control = await meta(ctx);
+export async function access(ctx: Ctx, initial?: Meta): Promise<Meta> {
+    let control = initial ?? await meta(ctx);
     const service = wallet(ctx);
     let result = await service.getSourcePolicy({ source: SOURCE });
     ensure(result.ok, result.ok ? '' : result.code);

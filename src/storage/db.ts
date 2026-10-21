@@ -135,6 +135,20 @@ export function identifier(value: unknown): string {
     return result;
 }
 
+export function shortNumber(prefix: 'D' | 'P' | 'G', id: string): string {
+    const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+    // UUID 最后60位均为随机位；保留内部 UUID，只压缩面向用户的编号。
+    let value = BigInt('0x' + id.replaceAll('-', '').slice(-15));
+    let code = '';
+
+    for (let i = 0; i < 12; i++) {
+        code = alphabet[Number(value & 31n)]! + code;
+        value >>= 5n;
+    }
+
+    return prefix + code;
+}
+
 export function canonical(value: unknown): string {
     if (Array.isArray(value)) {
         return '[' + value.map(canonical).join(',') + ']';

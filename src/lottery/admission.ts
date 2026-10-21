@@ -1,8 +1,8 @@
 import { eventKey } from '../storage/events.js';
 import type { Session } from '@qqbot/sdk';
-import type { Ctx, Draw, DrawBody, Kind, Pool, Rules } from '../contracts.js';
+import type { Ctx, Draw, DrawBody, Kind, Meta, Pool, Rules } from '../contracts.js';
 import { MINUTE, SOURCE } from '../contracts.js';
-import { atomic, beijing, ensure, failure, LIVE, NOW, sql } from '../storage/db.js';
+import { atomic, beijing, ensure, failure, LIVE, NOW, shortNumber, sql } from '../storage/db.js';
 import { prepareDebit, wallet } from '../points/operations.js';
 import { access } from '../access.js';
 import { validateRules } from './rules.js';
@@ -19,7 +19,8 @@ export function capacity(botId: string): { sql: string; params: unknown[] } {
         botId, botId, botId, botId, botId, botId) as { sql: string; params: unknown[] };
 }
 
-export async function admit(ctx: Ctx, session: Session, kind: Kind, poolId: string, count: number): Promise<Draw> {
+export async function admit(ctx: Ctx, session: Session, kind: Kind, poolId: string, count: number,
+    options: { quote?: number; control?: Meta } = {}): Promise<Draw> {
     const key = eventKey(session);
     const existing = await ctx.db.first<Draw>('SELECT * FROM {draws} WHERE bot_id=? AND event_key=?', ctx.botId, key);
 
@@ -27,9 +28,9 @@ export async function admit(ctx: Ctx, session: Session, kind: Kind, poolId: stri
         return existing;
     }
 
-    const control = await access(ctx);
+    const control = await access(ctx, options.control);
     const id = crypto.randomUUID();
-    const short = 'D' + id.replaceAll('-', '');
+    const short = shortNumber('D', id);
     const created = Date.now();
     const pool = await ctx.db.first<Pool>('SELECT * FROM {pools} WHERE bot_id=? AND id=?', ctx.botId, poolId);
     let rules: Rules;
@@ -37,6 +38,7 @@ export async function admit(ctx: Ctx, session: Session, kind: Kind, poolId: stri
     try {
         ensure(control.admission_enabled === 1, 'ADMISSION_CLOSED');
         ensure(pool?.state === 'ACTIVE', 'POOL_CLOSED');
+        ensure(options.quote === undefined || pool.version === options.quote, 'QUOTE_CHANGED');
         rules = validateRules(JSON.parse(pool.rules));
         ensure(rules.kind === kind && Number.isInteger(count) && count === 1);
         ensure(created >= rules.starts && created < rules.ends, 'POOL_CLOSED');
@@ -82,7 +84,10 @@ export async function admit(ctx: Ctx, session: Session, kind: Kind, poolId: stri
             return found;
         }
 
-        return reject(ctx, session, key, id, short, created, kind, poolId, failure(error).code === 'CONFLICT' ? 'ADMISSION_LIMIT' : 'UNAVAILABLE');
+        const current = options.quote !== undefined ? await ctx.db.first<Pool>('SELECT * FROM {pools} WHERE bot_id=? AND id=?', ctx.botId, poolId) : null;
+        const code = current && current.version !== options.quote ? 'QUOTE_CHANGED' : failure(error).code === 'CONFLICT' ? 'ADMISSION_LIMIT' : 'UNAVAILABLE';
+
+        return reject(ctx, session, key, id, short, created, kind, poolId, code);
     }
 
     return (await ctx.db.first<Draw>('SELECT * FROM {draws} WHERE bot_id=? AND id=?', ctx.botId, id))!;

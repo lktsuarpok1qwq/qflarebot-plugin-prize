@@ -60,7 +60,7 @@ function createMessageButtons(current, changed) {
                     rows.splice(index, 1);
 
                     return rows[Math.min(index, rows.length - 1)]?.[0];
-                }, row.some(b => ['continue', 'next'].includes(b.action))));
+                }, row.some(b => FIELDS[model.module][model.key].requiredActions?.includes(b.action))));
             group.append(header);
             row.forEach((item, position) => {
                 const box = make('div', undefined, 'reply-button-item'), grid = make('div', undefined, 'grid');
@@ -71,7 +71,7 @@ function createMessageButtons(current, changed) {
                     changed();
                 };
                 grid.append(field('按钮文字', register(label, index, position, 'label')));
-                const action = make('select'), protectedAction = ['continue', 'next'].includes(item.action);
+                const action = make('select'), protectedAction = !!FIELDS[model.module][model.key].requiredActions?.includes(item.action);
                 Object.entries(actions).filter(([key]) => ['command', 'link', ...FIELDS[model.module][model.key].actions || []].includes(key)).forEach(([key, label]) => {
                     const o = make('option', label);
                     o.value = key;

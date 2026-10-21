@@ -1,4 +1,4 @@
-import type { Claim, Ctx, Draw } from '../contracts.js';
+import type { Claim, Ctx, Draw, Meta, Pool } from '../contracts.js';
 import { bindingExists } from '../inventory/bindings.js';
 import { canonical, ensure, integer, meta, Fault } from './db.js';
 
@@ -121,6 +121,29 @@ export async function continuePage(ctx: Ctx, cursor: string, user: string, expec
         : scope.table === 'draws' && scope.filter.kind === expected), 'CURSOR_INVALID');
 
     return page(ctx, scope.table, scope.filter, scope.limit, cursor);
+}
+
+export async function activePools(ctx: Ctx, control: Meta, cursor?: string) {
+    const scope = 'active-pools';
+    let bound: Cursor = {
+        bot: ctx.botId, scope, upper: Date.now(), at: 0, id: '', epoch: control.data_revision,
+        expires: Date.now() + 30 * 60_000
+    };
+
+    if (cursor) {
+        bound = await open(control.cursor_secret, cursor);
+        ensure(bound.bot === ctx.botId && bound.scope === scope && bound.expires > Date.now()
+            && bound.epoch === control.data_revision, 'CURSOR_EXPIRED');
+    }
+
+    const rows = await ctx.db.all<Pool>(`SELECT * FROM {pools} WHERE bot_id=? AND id>? AND state='ACTIVE'
+        AND json_extract(rules,'$.kind')='POOL' AND json_extract(rules,'$.starts')<=?
+        AND json_extract(rules,'$.ends')>? ORDER BY id LIMIT 6`, ctx.botId, bound.id, bound.upper, Date.now());
+    const more = rows.length > 5;
+    rows.length = Math.min(rows.length, 5);
+    const next = more ? await seal(control.cursor_secret, { ...bound, id: rows.at(-1)!.id }) : null;
+
+    return { rows, next };
 }
 
 export async function catalog(ctx: Ctx, table: 'pools' | 'prizes' | 'archive_batches' | 'admin_audit', cursor?: string, kind?: 'POOL') {

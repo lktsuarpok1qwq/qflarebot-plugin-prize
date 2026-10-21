@@ -44,6 +44,7 @@ export async function act(ctx: Ctx, session: Session, action: ClaimAction, short
         claim = rows[0]!;
 
         if (action === 'claim') {
+            ensure(claim.state !== 'PENDING' || claim.expires_at! > Date.now(), 'CLAIM_EXPIRED');
             ensure(claim.state === 'PENDING' || claim.state === 'CLAIMED', 'CLAIM_STATE');
         } else {
             ensure(claim.state === 'CLAIMED' && claim.details_version === detailsVersion, 'DETAILS_VERSION_CONFLICT');
@@ -103,7 +104,10 @@ export async function act(ctx: Ctx, session: Session, action: ClaimAction, short
             return JSON.parse(winner.outcome) as Outcome;
         }
 
-        const rejected = { ok: false, code: 'CONFLICT', target: claim?.id };
+        const current = action === 'claim' && claim ? await ctx.db.first<{ state: string; expired: number }>(
+            `SELECT state,CASE WHEN expires_at<=${NOW} THEN 1 ELSE 0 END AS expired FROM {claims}
+                WHERE bot_id=? AND id=? AND user_id=?`, ctx.botId, claim.id, session.userId) : null;
+        const rejected = { ok: false, code: current?.state === 'PENDING' && current.expired ? 'CLAIM_EXPIRED' : 'CONFLICT', target: claim?.id };
         await ctx.db.run(`INSERT INTO {claim_actions}(bot_id,event_key,user_id,request_hash,action,target,outcome,created_at)
             VALUES(?,?,?,?,?,?,?,${NOW}) ON CONFLICT(bot_id,event_key) DO NOTHING`, ctx.botId, key, session.userId,
             digest, action, claim?.id ?? null, JSON.stringify(rejected));

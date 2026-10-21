@@ -82,3 +82,11 @@ function random32(): number {
 export function money(minor: number): string {
     return (minor / 100).toFixed(2);
 }
+
+export function probability(weight: number, total: number): string {
+    const value = weight / total * 100;
+
+    if (!Number.isFinite(value) || value < 0 || value > 100) { throw new Error('INVALID_PROBABILITY'); }
+
+    return value.toFixed(value > 0 && value < 0.0001 ? 10 : 4).replace(/\.?0+$/, '');
+}

@@ -1,3 +1,4 @@
+import { shortNumber } from '../storage/db.js';
 import { OPEN_END } from '../contracts.js';
 import { runtime } from './runtime.js';
 import { editor } from './editor.js';
@@ -78,6 +79,7 @@ ${messagesHTML}
 <div class="actions" id="poolStates"><button data-state="ACTIVE">开放 / 恢复</button><button data-state="PAUSED">暂停</button><details><summary>更多操作</summary><button data-state="CLOSED" class="danger">关闭活动</button><button data-state="ARCHIVED" class="danger">归档活动</button></details></div></div>
 </template><dialog id="stockAdjustDialog" aria-labelledby="stockAdjustTitle"><h2 id="stockAdjustTitle">调整库存</h2><div id="stockAdjustSummary" class="muted"></div><div id="stockAdjustPending" hidden><p class="muted">结果尚未确认，请核对原操作</p><div class="row"><button type="button" id="verifyStockAdjustment">核对原操作</button><button type="button" id="retryStockAdjustment">重试原操作</button></div></div><form id="stockAdjustForm"><div class="grid"><label>操作<select id="stockMode"><option value="ADD">补货</option><option value="RETIRE">减少可用库存</option></select></label><label>数量<input id="stockAdjustAmount" type="number" min="1" max="1000000" step="1" required></label></div><p id="stockAdjustPreview" class="change-preview" aria-live="polite">请输入调整数量</p><div class="actions"><button type="button" id="closeStockAdjust">取消</button><button id="saveStockAdjust" class="primary">确认调整</button></div></form></dialog><div id="toasts" aria-live="polite"></div><dialog id="confirm" aria-labelledby="confirmTitle" aria-describedby="confirmBody"><h2 id="confirmTitle">确认操作</h2><p id="confirmBody"></p><div class="actions"><button id="confirmCancel" autofocus>取消</button><button id="confirmYes" class="primary">确认</button></div></dialog>
 <script type="module">
+${"const shortNumber = " + shortNumber.toString() + ";"}
 ${runtime}
 ${settingsUI}
 ${editor}

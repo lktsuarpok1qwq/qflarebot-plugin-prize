@@ -37,8 +37,14 @@ export function message(ctx: Ctx, module: MessageModule, key: string, values: Re
         if (item.action === 'link') { return [button.link(item.label, item.data!, { visitedLabel: item.label })]; }
 
         const command = item.action === 'command' ? item.data : commands[item.action];
+        const publicAction = ['pool', 'records', 'prizes', 'history', 'buy'].includes(item.action)
+            || module === 'pool' && key === 'activities' && item.action === 'next';
 
-        return command ? [button.command(item.label, command, { enter: navigation?.scene === 'group' || item.action === 'details' ? false : item.enter, visitedLabel: item.label, permission: navigation?.userId ? { type: 0, specify_user_ids: [navigation.userId] } : undefined })] : [];
+        return command ? [button.command(item.label, command, {
+            enter: navigation?.scene === 'group' || item.action === 'details' ? false : item.enter, visitedLabel: item.label,
+            style: ['buy', 'claim', 'continue', 'next'].includes(item.action) ? 1 : 0,
+            permission: !publicAction && navigation?.userId ? { type: 0, specify_user_ids: [navigation.userId] } : { type: 2 }
+        })] : [];
     })).filter(row => row.length);
 
     return { text, markdown: { content: text }, ...(rows.length ? { keyboard: keyboard(rows) } : {}) };
