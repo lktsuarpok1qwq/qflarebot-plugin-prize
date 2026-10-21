@@ -1,0 +1,253 @@
+export const runtime = String.raw`
+import { createBridge } from '/bridge.js';
+
+const bridge = await createBridge();
+const $ = id => document.getElementById(id);
+const state = { tab: 'pools', epoch: 0, control: null, pools: [], prizes: [], removedPrizes: new Set(), settingsBaseline: null, claim: null, draw: null, pending: null, busy: false, confirmBusy: false, focusAfter: null };
+const observer = new ResizeObserver(() => bridge.resize(Math.ceil($('content').getBoundingClientRect().height + 16)));
+observer.observe($('content'));
+bridge.setTitle('奖品中心');
+
+function toast(message, level = 'info') {
+    if (bridge.embedded) {
+        bridge.toast(message, level);
+
+        return;
+    }
+
+    const node = document.createElement('div');
+    node.className = 'toast';
+    node.textContent = message;
+    node.tabIndex = 0;
+    node.onclick = () => node.remove();
+    $('toasts').append(node);
+
+    while ($('toasts').children.length > 3) { $('toasts').firstChild.remove(); }
+
+    setTimeout(() => node.remove(), 5000);
+}
+
+function confirm(message) {
+    if (state.confirmBusy) { return Promise.resolve(false); }
+
+    state.confirmBusy = true;
+    const dialog = $('confirm');
+    const focus = document.activeElement;
+    $('confirmBody').textContent = message;
+    dialog.showModal();
+    $('confirmCancel').focus();
+
+    return new Promise(resolve => {
+        const end = value => {
+            dialog.close();
+            dialog.oncancel = null;
+            dialog.onclick = null;
+            $('confirmYes').onclick = null;
+            $('confirmCancel').onclick = null;
+            state.confirmBusy = false;
+
+            if (focus?.isConnected) { focus.focus({ preventScroll: true }); }
+
+            resolve(value);
+        };
+        $('confirmYes').onclick = () => end(true);
+        $('confirmCancel').onclick = () => end(false);
+        dialog.oncancel = event => {
+            event.preventDefault();
+            end(false);
+        };
+        dialog.onclick = event => {
+            if (event.target === dialog) {
+                const r = dialog.getBoundingClientRect();
+
+                if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) { end(false); }
+            }
+        };
+    });
+}
+
+function message(code) {
+    return ({
+        CURSOR_EXPIRED: '列表已变化，请重新查询', CURSOR_INVALID: '翻页标识无效，请重新查询', CONFLICT: '记录版本已变化，请重新加载并保留草稿',
+        INVALID_ARGUMENT: '请检查输入内容与范围', POINTS_NOT_READY: '请先在 Points 启用来源并配置完整权限',
+        ARCHIVE_DISABLED: '请先开启 R2 归档设置', QUERY_WORK_LIMIT: '工作量超过上限，请缩小查询范围', QUERY_RANGE: '请选择最多31天的有效时段',
+        QUERY_SNAPSHOT_CHANGED: '统计期间数据已变化，请重新查询', UNAVAILABLE: '服务暂不可用，请保留原操作号稍后核对',
+        PRIZE_IN_USE: '库存正在占用，不能移除', PRIZE_REMOVED: '商品已移除，请刷新库存', PRIZE_NOT_READY: '绑定商品已移除或不存在，请重新选择',
+        SCHEMA_NOT_READY: '正在自动准备，请稍后刷新', SCHEMA_INITIALIZING: '正在自动准备，请稍后刷新',
+        SCHEMA_UNSUPPORTED: '数据结构不完整或不受支持，请保留数据并核查'
+    })[code] || ('操作未完成（' + code + '）');
+}
+
+async function api(path, init) {
+    const response = await bridge.fetch(path, init);
+    const result = await response.json();
+
+    if (!response.ok || result.ok === false) {
+        if (result.code === 'CURSOR_EXPIRED' || result.code === 'CURSOR_INVALID') { document.dispatchEvent(new Event('prize:write')); }
+
+        throw Object.assign(new Error(message(result.code || 'UNAVAILABLE')), { result });
+    }
+
+    return result;
+}
+
+function showPending() {
+    const p = state.pending;
+    $('pending').hidden = !p;
+
+    if (p) { $('pendingText').textContent = p.request.action + ' · ' + p.request.target + ' · ' + p.request.operationId; }
+}
+
+function setBusy(value) {
+    state.busy = value;
+    $('content').inert = value;
+    $('content').setAttribute('aria-busy', String(value));
+    syncDirty();
+}
+
+function invalidate() {
+    state.epoch++;
+    state.claim = null;
+    state.draw = null;
+    $('claimDetail').hidden = true;
+    $('drawDetail').hidden = true;
+}
+
+async function run(task) {
+    if (state.busy) { return; }
+
+    const origin = document.activeElement;
+    setBusy(true);
+
+    try { await task(); } catch (error) { toast(error.message, 'error'); } finally {
+        setBusy(false);
+
+        const focus = state.focusAfter || origin;
+        state.focusAfter = null;
+
+        if (document.activeElement === document.body && focus?.isConnected && !focus.disabled) {
+            focus.focus({ preventScroll: true });
+        }
+    }
+}
+
+async function write(action, target, version, params, message, done) {
+    if (state.pending) {
+        toast('请先核对原操作', 'warning');
+
+        return;
+    }
+
+    validateRequest(action, target, version, params);
+
+    if (!await confirm(message)) { return; }
+
+    const request = { operationId: crypto.randomUUID(), action, target, expectedVersion: version, params };
+    state.pending = { request, done, epoch: state.epoch };
+    showPending();
+    await sendPending();
+}
+
+async function sendPending() {
+    const pending = state.pending;
+
+    try {
+        const response = await bridge.fetch('/api/manage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(pending.request) });
+        const result = await response.json();
+
+        if (result.operationId !== pending.request.operationId || result.action !== pending.request.action || result.target !== pending.request.target || typeof result.ok !== 'boolean' || typeof result.code !== 'string') { throw new Error('响应不完整，请核对原操作'); }
+
+        finishPending(result);
+    } catch (error) { toast('结果尚未确认，请核对原操作', 'warning'); }
+}
+
+function validateOutcome(result, request) {
+    if (typeof result?.ok !== 'boolean' || typeof result.code !== 'string') { throw new Error('原操作结果不完整'); }
+
+    if (!result.ok) { return; }
+
+    const codes = ({ enable: ['POINTS_READY', 'POINTS_NOT_READY'], maintenance: ['MAINTENANCE_ACCEPTED'], archive: ['MAINTENANCE_ACCEPTED'] })[request.action] || ['OK'];
+
+    if (!codes.includes(result.code) || result.target !== request.target) { throw new Error('原操作结果不匹配'); }
+
+    if (['messages', 'pool', 'poolState', 'stockCreate', 'stock', 'stockRemove', 'settings', 'enable', 'disable', 'fulfill', 'cancel', 'recover'].includes(request.action)
+        && (!Number.isSafeInteger(result.version) || result.version !== request.expectedVersion + 1)) { throw new Error('原操作版本不完整'); }
+
+    if (request.action === 'messages' && (!result.templates || result.templates.version !== result.version || JSON.stringify(result.templates.config) !== JSON.stringify(request.params.config))) { throw new Error('模板回执不匹配'); }
+
+    if (['stockCreate', 'stock', 'stockRemove'].includes(request.action)) {
+        const delta = request.action === 'stockRemove' ? 0 : request.params.amount * (request.action === 'stockCreate' || request.params.mode === 'ADD' ? 1 : -1);
+        const s = result.stock;
+
+        if (result.delta !== delta || !s || s.id !== request.target || s.version !== result.version
+            || typeof s.bound !== 'boolean' || typeof s.name !== 'string' || !s.name.length || s.deleted !== (request.action === 'stockRemove' ? 1 : 0)
+            || !['available', 'reserved', 'fulfilled'].every(key => Number.isSafeInteger(s[key]) && s[key] >= 0)) { throw new Error('原库存结果不完整或不匹配'); }
+
+        if (request.action === 'stockCreate' && (s.name !== request.params.name || s.available !== request.params.amount || s.reserved !== 0 || s.fulfilled !== 0)) { throw new Error('原创建结果不匹配'); }
+    }
+
+    const states = ({ stockRemove: ['REMOVED'], pool: ['DRAFT', 'ACTIVE', 'PAUSED'], poolState: [request.params.state], fulfill: ['FULFILLED'], cancel: ['CANCELLED'], recover: ['ACCEPTED'], maintenance: ['QUEUED'], archive: ['QUEUED'] })[request.action];
+
+    if (states && !states.includes(result.state)) { throw new Error('原操作状态不匹配'); }
+}
+
+function finishPending(result) {
+    const p = state.pending;
+
+    if (!p) { return; }
+
+    validateOutcome(result, p.request);
+
+    if (result.ok) {
+        p.done?.(result);
+
+        if (p.epoch === state.epoch) { toast('操作已记录', 'success'); }
+    } else if (!result.ok && p.epoch === state.epoch) { toast(message(result.code), 'error'); }
+
+    state.pending = null;
+    showPending();
+    state.epoch++;
+    $('admission').textContent = '请刷新状态';
+    document.dispatchEvent(new CustomEvent('prize:write', { detail: { action: p.request.action } }));
+}
+
+async function verifyPending() {
+    const p = state.pending;
+
+    if (!p) { return; }
+
+    const result = await api('/api/operations/' + encodeURIComponent(p.request.operationId));
+    const r = result.data;
+
+    if (!r || r.state === 'PENDING') {
+        toast('原操作仍未确认，可重试原请求', 'warning');
+
+        return;
+    }
+
+    if (r.state !== 'DONE' || r.operationId !== p.request.operationId || r.action !== p.request.action || r.target !== p.request.target || !r.outcome || typeof r.outcome.ok !== 'boolean' || typeof r.outcome.code !== 'string') { throw new Error('原操作收据不匹配'); }
+
+    finishPending(r.outcome);
+}
+
+$('verify').onclick = () => run(verifyPending);
+$('retry').onclick = () => run(sendPending);
+
+function node(tag, text, className) {
+    const element = document.createElement(tag);
+
+    if (text !== undefined) { element.textContent = text; }
+
+    if (className) { element.className = className; }
+
+    return element;
+}
+
+function button(label, handler) {
+    const element = node('button', label);
+    element.type = 'button';
+    element.onclick = () => run(handler);
+
+    return element;
+}
+`;
