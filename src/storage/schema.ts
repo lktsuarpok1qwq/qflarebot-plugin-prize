@@ -153,7 +153,8 @@ export async function initialize(ctx: Ctx): Promise<'VERIFYING' | 'READY'> {
     return 'VERIFYING';
 }
 
-export async function ready(ctx: Ctx, deferBusiness = false): Promise<void> {
+// 返回本次是否执行结构核验；命令据此缩小资金推进量，不依赖下一次命中同一实例。
+export async function ready(ctx: Ctx, deferBusiness = false): Promise<boolean> {
     try {
         await meta(ctx);
     } catch (error) {
@@ -162,13 +163,16 @@ export async function ready(ctx: Ctx, deferBusiness = false): Promise<void> {
         // 创建与核验分属独立请求，避免首次使用耗尽宿主与 Points 的共享预算。
         ensure(await initialize(ctx) === 'READY' && !deferBusiness, 'SCHEMA_INITIALIZING');
 
-        return;
+        return true;
     }
 
     if (!verified.has(ctx.botId)) {
         await verifyReady(ctx);
-        ensure(!deferBusiness, 'SCHEMA_INITIALIZING');
+
+        return true;
     }
+
+    return false;
 }
 
 async function verifyReady(ctx: Ctx): Promise<void> {

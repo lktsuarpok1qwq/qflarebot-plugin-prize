@@ -131,7 +131,7 @@ async function prize(input: CommandInput, names: Commands): Promise<OutgoingMess
     return message(ctx, 'prize', 'detail', { info: claimLine(ctx, full), detailsVersion: String(row.details_version), instructions }, ['info', 'instructions']);
 }
 
-async function lottery(input: CommandInput, names: Commands): Promise<OutgoingMessage> {
+async function lottery(input: CommandInput, names: Commands, singleStage: boolean): Promise<OutgoingMessage> {
     const { ctx, session, args } = input;
     const [action, arg] = args;
     const kind = 'POOL';
@@ -145,7 +145,7 @@ async function lottery(input: CommandInput, names: Commands): Promise<OutgoingMe
             ctx.botId, session.userId, arg, kind);
         ensure(row, 'NOT_FOUND');
 
-        return displayDraw(ctx, await advance(ctx, row.id), names);
+        return displayDraw(ctx, await advance(ctx, row.id, singleStage), names);
     }
 
     if (action === '记录') {
@@ -164,7 +164,7 @@ async function lottery(input: CommandInput, names: Commands): Promise<OutgoingMe
         ensure(args.length === 2 && arg, 'INVALID_ARGUMENT');
         const row = await admit(ctx, session, kind, arg!, 1);
 
-        return displayDraw(ctx, await advance(ctx, row.id), names);
+        return displayDraw(ctx, await advance(ctx, row.id, singleStage), names);
     }
 
     if (action === '概率') {
@@ -205,11 +205,11 @@ export async function command(input: CommandInput, entry: 'pool' | 'prize'): Pro
     let ctx = input.ctx;
 
     try {
-        await ready(input.ctx, true);
+        const verifiedNow = await ready(input.ctx, true);
         ctx = await messageContext(ctx, entry);
         ensure(input.session.botId === input.ctx.botId && input.session.userId && input.session.targetId, 'IDENTITY_REQUIRED');
 
-        return entry === 'prize' ? await prize({ ...input, ctx }, names) : await lottery({ ...input, ctx }, names);
+        return entry === 'prize' ? await prize({ ...input, ctx }, names) : await lottery({ ...input, ctx }, names, verifiedNow);
     } catch (error) {
         const code = failure(error).code;
 
