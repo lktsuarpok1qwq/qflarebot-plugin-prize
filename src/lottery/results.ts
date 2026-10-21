@@ -64,7 +64,7 @@ export async function fixResult(ctx: Ctx, row: Draw): Promise<Draw> {
             AND (? IS NULL OR EXISTS(SELECT 1 FROM {prizes} WHERE bot_id=? AND id=? AND available>0))`,
             ...guard.params!, ctx.botId, row.pool_id, revision, ...stockGuards.flatMap(g => g.params!), goods?.prizeId ?? null, ctx.botId, goods?.prizeId ?? null), writes);
 
-        return draw(ctx, row.id);
+        return { ...row, state: 'DRAWN', reward, award_ids: JSON.stringify([...new Set(results.map(a => a.id))]), version: row.version + 1, body: JSON.stringify(payload) };
     } catch (error) {
         const actual = await draw(ctx, row.id);
 

@@ -1,14 +1,14 @@
-import { FIELDS, MODULES, WORDS } from './fields.js';
+import { ACTION_LABELS, FIELDS, MODULES, WORDS } from './fields.js';
 import type { MessageModule } from './fields.js';
 
-export interface MessageButton { label: string; action: 'command' | 'link' | 'continue' | 'next'; data?: string; enter?: boolean; }
+export interface MessageButton { label: string; action: 'command' | 'link' | 'continue' | 'next' | 'pool' | 'records' | 'prizes' | 'history' | 'buy' | 'claim' | 'details' | 'account'; data?: string; enter?: boolean; }
 export interface MessageConfiguration { replies: Record<string, string>; buttons: Record<string, MessageButton[][]>; words: Record<string, string>; }
 export interface TemplateError { field: string; target: 'text' | 'buttons' | 'words'; message: string; start: number; end: number; row?: number; item?: number; control?: string; }
 
 export const DEFAULTS: Record<MessageModule, MessageConfiguration> = Object.fromEntries(MODULES.map(module => [module, {
     replies: Object.fromEntries(Object.entries(FIELDS[module]).map(([key, value]) => [key, value.text])),
     buttons: Object.fromEntries(Object.entries(FIELDS[module]).filter(([, field]) => !field.fragment).map(([key, field]) => [key,
-        field.actions?.length ? [[{ action: field.actions[0], label: field.actions[0] === 'continue' ? '继续处理' : '下一页', enter: false }]] : []])),
+        field.actions?.length ? [field.actions.map(action => ({ action, label: ACTION_LABELS[action], enter: action !== 'details' }))] : []])),
     words: module === 'common' ? Object.fromEntries(Object.entries(WORDS).map(([key, field]) => [key, field.text])) : {}
 }])) as Record<MessageModule, MessageConfiguration>;
 
@@ -87,6 +87,8 @@ export function createTemplateTools(fields: typeof FIELDS, words: typeof WORDS) 
                     if (button.action === 'link') {
                         if (!safeHttpUrl(button.data) || button.enter !== undefined) { return fail('请填写 HTTP 或 HTTPS 链接', 'data'); }
                     } else {
+                        if (button.action === 'details' && button.enter !== false) { return fail('填写资料只能填入输入框', 'enter'); }
+
                         if (typeof button.enter !== 'boolean') { return fail('请选择点击方式', 'enter'); }
 
                         if (button.action === 'command' ? typeof button.data !== 'string' || !button.data.trim() || new TextEncoder().encode(button.data).length > 300 || /[\u0000-\u001f{}]/.test(button.data) : button.data !== undefined) { return fail('命令为单行固定文字，原业务参数由程序生成', 'data'); }
@@ -94,8 +96,8 @@ export function createTemplateTools(fields: typeof FIELDS, words: typeof WORDS) 
                 }
             }
 
-            for (const action of field.actions ?? []) {
-                if (rows.flat().filter(button => button.action === action).length !== 1) { return problem(key, 'buttons', '请保留且仅保留一个' + (action === 'continue' ? '原业务继续' : '原列表翻页') + '按钮'); }
+            for (const action of (field.actions ?? []).filter(action => ['continue', 'next'].includes(action))) {
+                if (rows.flat().filter(button => button.action === action).length !== 1) { return problem(key, 'buttons', '请保留且仅保留一个' + (action === 'continue' ? '原购买结果' : '原列表翻页') + '按钮'); }
             }
         }
 
@@ -118,7 +120,25 @@ export function createTemplateTools(fields: typeof FIELDS, words: typeof WORDS) 
 
     function escapeMarkdown(value: string): string { return value.replace(/[\\`*_\[\]()~>#|!]/g, '\\$&'); }
 
-    return { templateError, configurationError, safeHttpUrl, renderTemplate, escapeMarkdown };
+    function commandUrl(command: string, enter = true): string {
+        const encoded = encodeURIComponent(command).replace(/[!'()*]/g, char => '%' + char.charCodeAt(0).toString(16).toUpperCase());
+
+        return 'mqqapi://aio/inlinecmd?command=' + encoded + '&enter=' + enter + '&reply=false';
+    }
+
+    function safeCommandUrl(value: string): boolean {
+        const match = /^mqqapi:\/\/aio\/inlinecmd\?command=([^&]+)&enter=(true|false)&reply=false$/.exec(value);
+
+        if (!match) { return false; }
+
+        try {
+            const command = decodeURIComponent(match[1]!);
+
+            return !!command.trim() && new TextEncoder().encode(command).length <= 300 && !/[\u0000-\u001f]/.test(command);
+        } catch { return false; }
+    }
+
+    return { templateError, configurationError, safeHttpUrl, renderTemplate, escapeMarkdown, commandUrl, safeCommandUrl };
 }
 
-export const { templateError, configurationError, safeHttpUrl, renderTemplate, escapeMarkdown } = createTemplateTools(FIELDS, WORDS);
+export const { templateError, configurationError, safeHttpUrl, renderTemplate, escapeMarkdown, commandUrl, safeCommandUrl } = createTemplateTools(FIELDS, WORDS);

@@ -36,7 +36,7 @@ export async function operation(ctx: Ctx, initial: Draw, index: number): Promise
     const payload = body(row);
     const op = payload.ops[index]!;
     const service = wallet(ctx);
-    const persist = () => save(ctx, row, { retry_at: 0 }, payload,
+    const persist = () => save(ctx, row, { retry_at: 0, ...(op.method === 'burn' ? op.outcome === 'COMMITTED' ? { state: 'DEBITED' as const } : { state: 'FAILED' as const, qualifies: 0, error: op.error ?? 'DEBIT_REJECTED' } : {}) }, payload,
         op.error && ['SOURCE_NOT_REGISTERED', 'SOURCE_DISABLED', 'SOURCE_NOT_ALLOWED'].includes(op.error)
             ? [sql(`UPDATE {schema_meta} SET admission_enabled=0,admission_revision=admission_revision+1,version=version+1
                 WHERE bot_id=?`, ctx.botId)] : []);
@@ -80,7 +80,7 @@ export async function operation(ctx: Ctx, initial: Draw, index: number): Promise
     }
 
     op.attempts++;
-    row = await save(ctx, row, { retry_at: Date.now() + (op.attempts === 1 ? 10 : 20) * MINUTE }, payload);
+    row = await save(ctx, row, { retry_at: Date.now() + (op.attempts === 1 ? 10 : 20) * MINUTE, ...(op.method === 'credit' ? { state: 'SETTLING' as const } : {}) }, payload);
     let result: Result<OperationReceipt>;
 
     try {

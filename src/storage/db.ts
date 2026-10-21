@@ -89,11 +89,12 @@ export function fence(row: Draw): DBStatement {
         row.bot_id, row.id, row.version, row.lease_token);
 }
 
-export async function save(ctx: Ctx, row: Draw, patch: Partial<Draw>, payload?: DrawBody, extra: DBStatement[] = []): Promise<Draw> {
+export async function save(ctx: Ctx, row: Draw, patch: Partial<Draw>, payload?: DrawBody, extra: DBStatement[] = [], condition?: DBStatement): Promise<Draw> {
     const write = patchDraw(row, patch, payload);
 
     if (extra.length) {
-        await atomic(ctx, fence(row), [write, ...extra]);
+        const guard = fence(row);
+        await atomic(ctx, condition ? sql(`(${guard.sql}) AND (${condition.sql})`, ...guard.params!, ...condition.params ?? []) : guard, [write, ...extra]);
     } else {
         // 只有一行更新时直接使用带 fencing 条件的原子 UPDATE，无需额外守卫事务
         const result = await ctx.db.run(write.sql + ` AND version=? AND lease_token=? AND lease_until>${NOW}`,
@@ -106,10 +107,9 @@ export async function save(ctx: Ctx, row: Draw, patch: Partial<Draw>, payload?: 
 
 export async function lease(ctx: Ctx, id: string): Promise<Draw | null> {
     const token = crypto.randomUUID();
-    const result = await ctx.db.run(`UPDATE {draws} SET lease_token=?,lease_until=${NOW}+120000,version=version+1
-        WHERE bot_id=? AND id=? AND lease_until<=${NOW} AND ${LIVE}`, token, ctx.botId, id);
 
-    return result.changes ? draw(ctx, id) : null;
+    return ctx.db.first<Draw>(`UPDATE {draws} SET lease_token=?,lease_until=${NOW}+120000,version=version+1
+        WHERE bot_id=? AND id=? AND lease_until<=${NOW} AND ${LIVE} RETURNING *`, token, ctx.botId, id);
 }
 
 export function failure(error: unknown): Outcome {

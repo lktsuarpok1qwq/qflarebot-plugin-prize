@@ -1,7 +1,7 @@
 export const messageButtons = String.raw`
 function createMessageButtons(current, changed) {
     let controls = [];
-    const actions = { command: '自定义命令', link: '打开链接', continue: '原业务继续', next: '原列表翻页' };
+    const actions = { command: '自定义命令', link: '打开链接', continue: '原购买结果', next: '原列表翻页', pool: '查看奖池', records: '购买记录', prizes: '我的奖品', history: '兑奖记录', buy: '购买一次', claim: '申请领取', details: '填写资料', account: '积分开户' };
     const make = (tag, value, cls) => node(tag, value, cls);
     const field = (name, input) => {
         const label = make('label', name);
@@ -72,7 +72,7 @@ function createMessageButtons(current, changed) {
                 };
                 grid.append(field('按钮文字', register(label, index, position, 'label')));
                 const action = make('select'), protectedAction = ['continue', 'next'].includes(item.action);
-                Object.entries(actions).filter(([key]) => ['command', 'link'].includes(key) || key === item.action).forEach(([key, label]) => {
+                Object.entries(actions).filter(([key]) => ['command', 'link', ...FIELDS[model.module][model.key].actions || []].includes(key)).forEach(([key, label]) => {
                     const o = make('option', label);
                     o.value = key;
                     action.append(o);
@@ -85,8 +85,9 @@ function createMessageButtons(current, changed) {
                     delete item.enter;
 
                     if (item.action === 'link') { item.data = 'https://'; } else {
-                        item.data = '';
-                        item.enter = false;
+                        if (item.action === 'command') { item.data = ''; }
+
+                        item.enter = item.action !== 'details';
                     }
 
                     draw(item);
@@ -94,7 +95,9 @@ function createMessageButtons(current, changed) {
                 };
                 const actionField = field('按钮功能', register(action, index, position, 'action'));
 
-                if (protectedAction) { actionField.append(make('span', '原业务参数由程序生成，保留此功能', 'muted')); }
+                if (protectedAction) { actionField.append(make('span', '原业务参数由程序生成，保留此功能', 'muted')); } else if (!['command', 'link'].includes(item.action)) {
+                    actionField.append(make('span', '自动携带实际命令和当前对象，仅条件满足时显示', 'muted'));
+                }
 
                 grid.append(actionField);
 
@@ -116,6 +119,7 @@ function createMessageButtons(current, changed) {
                         enter.append(o);
                     });
                     enter.value = String(item.enter);
+                    enter.disabled = item.action === 'details';
                     enter.onchange = () => {
                         item.enter = enter.value === 'true';
                         changed();
@@ -173,7 +177,7 @@ function createMessageButtons(current, changed) {
             target.append(group);
         });
         target.append(control('添加一行', () => {
-            const item = { action: 'command', label: '帮助', data: '/奖品', enter: false };
+            const item = { action: 'command', label: '帮助', data: model.module === 'pool' ? '/抽奖' : '/兑奖', enter: false };
             rows.push([item]);
 
             return item;

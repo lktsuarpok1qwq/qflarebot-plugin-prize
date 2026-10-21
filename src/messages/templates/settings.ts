@@ -1,4 +1,4 @@
-import type { Ctx } from '../../contracts.js';
+import type { Ctx, Meta } from '../../contracts.js';
 import { ensure, meta } from '../../storage/db.js';
 import { DEFAULTS, configurationError } from './config.js';
 import type { MessageConfiguration } from './config.js';
@@ -36,8 +36,8 @@ export async function loadTemplates(ctx: Ctx, module: MessageModule): Promise<Te
     return snapshot(stored((await meta(ctx)).settings)[module], module);
 }
 
-export async function messageContext(ctx: Ctx, module: MessageModule): Promise<Ctx> {
-    const values = stored((await meta(ctx)).settings);
+export async function messageContext(ctx: Ctx, module: MessageModule, control?: Meta): Promise<Ctx> {
+    const values = stored((control ?? await meta(ctx)).settings);
     // 一次读取，只校验和装载本入口与通用提示；其它模块配置不会增加当前命令的解析工作。
     const templates = Object.fromEntries([...new Set<MessageModule>(['common', module])].map(name => [name, snapshot(values[name], name).config]));
 

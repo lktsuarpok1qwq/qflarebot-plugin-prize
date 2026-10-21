@@ -22,10 +22,12 @@ async function settled(ctx: Ctx, row: Draw): Promise<Draw> {
     // 完成时间以最后一笔已确认资金写入为准，恢复不会延长兑奖期限。
     const at = Math.max(debit.receipt.committedAtMs, reward?.receipt?.committedAtMs ?? 0);
 
+    const claim = activation(row, at);
+
     return save(ctx, row, {
         state: 'SETTLED', error: null, settled_at: at,
         winner: payload.results.some(a => a.reward > 0 || a.prizeId) ? 1 : 0
-    }, undefined, await activation(ctx, row, at));
+    }, undefined, claim.writes, claim.condition);
 }
 
 async function cancellation(ctx: Ctx, row: Draw): Promise<Draw> {
@@ -45,7 +47,8 @@ async function cancellation(ctx: Ctx, row: Draw): Promise<Draw> {
                 originalTransactionId: debit.receipt.transactionId, reason: '奖品中心取消购买'
             }
         });
-        row = await save(ctx, row, {}, payload);
+        // operation 在调用前连同 attempts 一并持久化完整退款输入。
+        row = { ...row, body: JSON.stringify(payload) };
     }
 
     const result = await operation(ctx, row, index);
@@ -59,7 +62,7 @@ async function cancellation(ctx: Ctx, row: Draw): Promise<Draw> {
     return save(ctx, result.row, { state: 'REFUNDED', qualifies: 0 }, undefined, await rollbackClaim(ctx, result.row));
 }
 
-export async function advance(ctx: Ctx, id: string, singleStage = false): Promise<Draw> {
+export async function advance(ctx: Ctx, id: string, stages = 2): Promise<Draw> {
     let row = await lease(ctx, id);
 
     if (!row) { return draw(ctx, id); }
@@ -76,7 +79,7 @@ export async function advance(ctx: Ctx, id: string, singleStage = false): Promis
             return row.state === 'NEEDS_REVIEW' ? row : await review(ctx, row, 'POINTS_INPUT_UNSUPPORTED');
         }
 
-        for (let step = 0; step < (singleStage ? 1 : 2); step++) {
+        for (let step = 0; step < stages; step++) {
             if (row.state === 'CREATED') {
                 ensure(body(row).ops[0]?.method === 'burn', 'DEBIT_INPUT_MISSING');
                 const result = await operation(ctx, row, 0);
@@ -84,17 +87,18 @@ export async function advance(ctx: Ctx, id: string, singleStage = false): Promis
 
                 if (result.unknown) { break; }
 
-                row = result.op.outcome === 'COMMITTED'
-                    ? await save(ctx, row, { state: 'DEBITED' })
-                    : await save(ctx, row, { state: 'FAILED', qualifies: 0, error: result.op.error ?? 'DEBIT_REJECTED' });
+                if (row.state === 'CREATED') {
+                    row = result.op.outcome === 'COMMITTED' ? await save(ctx, row, { state: 'DEBITED' })
+                        : await save(ctx, row, { state: 'FAILED', qualifies: 0, error: result.op.error ?? 'DEBIT_REJECTED' });
+                }
             } else if (row.state === 'DEBITED') {
                 row = await fixResult(ctx, row);
+
+                if (row.state === 'DEBITED') { break; }
             } else if (row.state === 'DRAWN' || row.state === 'SETTLING') {
                 if (row.reward === 0) {
                     row = await settled(ctx, row);
                 } else {
-                    if (row.state === 'DRAWN') { row = await save(ctx, row, { state: 'SETTLING' }); }
-
                     const index = body(row).ops.findIndex(op => op.method === 'credit');
                     ensure(index >= 0, 'REWARD_INPUT_MISSING');
                     const result = await operation(ctx, row, index);
@@ -136,7 +140,7 @@ export async function recoverOne(ctx: Ctx): Promise<boolean> {
 
     if (!row) { return false; }
 
-    await advance(ctx, row.id, true);
+    await advance(ctx, row.id, 1);
 
     return true;
 }

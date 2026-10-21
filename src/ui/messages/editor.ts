@@ -9,9 +9,9 @@ import { messageButtons } from './buttons.js';
 const json = (value: unknown) => JSON.stringify(value).replace(/</g, '\\u003c');
 export const messagesUI = [
     'const FIELDS=' + json(FIELDS) + ', MODULES=' + json(MODULES) + ', DEFAULTS=' + json(DEFAULTS) + ', WORDS=' + json(WORDS) + ', VARIABLE_HELP=' + json(VARIABLE_HELP) + ';',
-    'const {configurationError,templateError,renderTemplate,escapeMarkdown,safeHttpUrl}=(' + createTemplateTools.toString() + ')(FIELDS,WORDS);',
-    'const renderQQMarkdown=(' + createMarkdown.toString() + ')(safeHttpUrl);',
-    'const previewText=(' + createTemplatePreview.toString() + ')(FIELDS,{escapeMarkdown,renderTemplate});',
+    'const {configurationError,templateError,renderTemplate,escapeMarkdown,safeHttpUrl,commandUrl,safeCommandUrl}=(' + createTemplateTools.toString() + ')(FIELDS,WORDS);',
+    'const renderQQMarkdown=(' + createMarkdown.toString() + ')(safeHttpUrl,safeCommandUrl);',
+    'const previewText=(' + createTemplatePreview.toString() + ')(FIELDS,{escapeMarkdown,renderTemplate,commandUrl});',
     TEXT_EDITOR_SCRIPT, IMAGE_EDITOR_SCRIPT, messageButtons,
     String.raw`
 const messageEditor = (() => {
@@ -78,6 +78,8 @@ const messageEditor = (() => {
 
         if (field.variables.includes('items') && Object.values(FIELDS[model.module]).some(f => f.fragment?.message === model.key && f.fragment.when === 'empty')) { choices.push(['empty', '暂无记录']); }
 
+        if (model.module === 'prize' && model.key === 'detail') { choices.push(['claimed', '已申请'], ['terminal', '已结束']); }
+
         const before = $('reply-scenario').value || model.positions.get(model.key)?.scenario;
         $('reply-scenario').replaceChildren();
         choices.forEach(([value, label]) => option($('reply-scenario'), value, label));
@@ -107,6 +109,8 @@ const messageEditor = (() => {
             for (const row of model.draft.buttons[result.root] || []) {
                 const line = node('div', undefined, 'actions');
                 row.forEach(item => {
+                    if (result.hiddenActions?.includes(item.action)) { return; }
+
                     if (item.action === 'next' && ['empty', 'last'].includes($('reply-scenario').value)) { return; }
 
                     const b = node('button', item.label);

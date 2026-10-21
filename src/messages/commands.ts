@@ -1,6 +1,6 @@
 import type { CommandInput, OutgoingMessage } from '@qqbot/sdk';
 import type { Award, Claim, Ctx, Draw, Pool, Rules } from '../contracts.js';
-import { ensure, failure, meta, NOW } from '../storage/db.js';
+import { ensure, failure, NOW } from '../storage/db.js';
 import { page, continuePage } from '../storage/pages.js';
 import { archived } from '../archive/jobs.js';
 import { admit } from '../lottery/admission.js';
@@ -10,6 +10,7 @@ import { act } from '../inventory/claims.js';
 import { ready } from '../storage/schema.js';
 import { configuration, message, piece, word } from './templates/render.js';
 import { messageContext } from './templates/settings.js';
+import { commandUrl } from './templates/config.js';
 import type { MessageModule } from './templates/fields.js';
 
 type Commands = { pool: string; prize: string; points: string };
@@ -20,6 +21,12 @@ function commandNames(input: CommandInput): Commands {
     const prefix = head.endsWith(input.command) ? head.slice(0, -input.command.length) : '';
 
     return { pool: prefix + '抽奖', prize: prefix + '兑奖', points: prefix + '积分' };
+}
+
+function link(ctx: Ctx, command: string, enter = true): string {
+    const scene = (ctx.config as { prizeNavigation?: { scene: string } })?.prizeNavigation?.scene;
+
+    return commandUrl(command, enter && scene === 'c2c');
 }
 
 function errorMessage(ctx: Ctx, code: string, names: Commands): OutgoingMessage {
@@ -42,46 +49,48 @@ async function displayDraw(ctx: Ctx, row: Draw, names: Commands): Promise<Outgoi
     if (row.state !== 'SETTLED') {
         const command = `${names.pool} 继续 ${row.short_id}`;
 
-        return message(ctx, module, 'pending', { state: word(ctx, row.state === 'NEEDS_REVIEW' ? 'review' : 'processing'), id: row.short_id, continueCommand: command }, [], { continue: command });
+        return message(ctx, module, 'pending', { state: word(ctx, row.state === 'NEEDS_REVIEW' ? 'review' : 'processing'), id: row.short_id, continueCommand: command, continueUrl: link(ctx, command) }, ['continueUrl'], { continue: command });
     }
 
     const full = await archived(ctx, 'draws', row) as Draw;
-    const payload = full.body ? JSON.parse(full.body) as { results?: Award[] } : {};
+    const payload = full.body ? JSON.parse(full.body) as { results?: Award[]; claimId?: string } : {};
     const results = payload.results ?? [];
 
-    if (results.some(a => a.prizeId)) { return message(ctx, 'pool', 'goodsWon', { prizeCommand: names.prize, name: results.find(a => a.prizeId)!.name }); }
+    if (results.some(a => a.prizeId)) { return message(ctx, 'pool', 'goodsWon', { prizeCommand: names.prize, name: results.find(a => a.prizeId)!.name }, [], { claim: (ctx.config as { prizeNavigation?: { scene: string } })?.prizeNavigation?.scene === 'c2c' && payload.claimId ? `${names.prize} 领取 P${payload.claimId.replaceAll('-', '')}` : '' }); }
 
     const earnings = row.reward ? piece(ctx, module, 'earned', { reward: money(row.reward) }) : piece(ctx, module, 'noWin');
 
-    return message(ctx, module, 'settled', { earnings, cost: money(row.cost), net: money(row.reward - row.cost), id: row.short_id }, ['earnings']);
+    return message(ctx, module, 'settled', { earnings, cost: money(row.cost), net: money(row.reward - row.cost), id: row.short_id }, ['earnings'], { buy: `${names.pool} 抽 ${row.pool_id}` });
 }
 
-function recordText(ctx: Ctx, row: Draw): string {
+function recordText(ctx: Ctx, row: Draw, command: string): string {
     const module = 'pool';
     const outcome = row.state !== 'SETTLED' ? piece(ctx, module, 'recordPending') : row.winner && row.reward === 0 && row.kind === 'POOL'
         ? piece(ctx, module, 'recordGoods') : piece(ctx, module, 'recordReward', { reward: money(row.reward) });
 
-    return piece(ctx, module, 'recordItem', { id: row.short_id, state: word(ctx, 'draw_' + row.state), cost: money(row.cost), outcome }, ['outcome']);
+    return piece(ctx, module, 'recordItem', { id: row.short_id, state: word(ctx, 'draw_' + row.state), cost: money(row.cost), outcome, continueUrl: link(ctx, command + ' 继续 ' + row.short_id) }, ['outcome', 'continueUrl']);
 }
 
-function claimLine(ctx: Ctx, claim: Claim): string {
+function claimLine(ctx: Ctx, claim: Claim, command: string): string {
     const name = claim.award ? (JSON.parse(claim.award) as Award).name : claim.prize_id;
     const deadline = claim.expires_at ? piece(ctx, 'prize', 'deadline', { expires: new Date(claim.expires_at + 8 * 3_600_000).toISOString().replace('T', ' ').slice(0, 19) }) : '';
 
-    return piece(ctx, 'prize', 'item', { id: claim.short_id, name, state: word(ctx, 'claim_' + claim.state), deadline }, ['deadline']);
+    return piece(ctx, 'prize', 'item', { id: claim.short_id, name, state: word(ctx, 'claim_' + claim.state), deadline, detailUrl: link(ctx, command + ' ' + claim.short_id) }, ['deadline', 'detailUrl']);
 }
 
 async function listText(ctx: Ctx, result: Awaited<ReturnType<typeof page>>, command: string, module: Exclude<MessageModule, 'common'>): Promise<OutgoingMessage> {
     const rows: string[] = [];
 
     for (const row of result.rows) {
-        rows.push('obtained_at' in row ? claimLine(ctx, await archived(ctx, 'claims', row) as Claim) : recordText(ctx, row));
+        rows.push('obtained_at' in row ? claimLine(ctx, await archived(ctx, 'claims', row) as Claim, command) : recordText(ctx, row, command));
     }
 
     const nextCommand = result.next ? `${command} 翻页 ${result.next}` : '';
     const items = rows.join('\n\n') || piece(ctx, module, module === 'prize' ? 'empty' : 'noRecords');
 
-    return message(ctx, module, module === 'prize' ? 'list' : 'records', { items, nextCommand }, ['items'], { next: nextCommand });
+    const claim = module === 'prize' ? result.rows.find(row => row.state === 'PENDING') as Claim | undefined : undefined;
+
+    return message(ctx, module, module === 'prize' ? 'list' : 'records', { items, nextCommand }, ['items'], { next: nextCommand, claim: claim ? command + ' 领取 ' + claim.short_id : '' });
 }
 
 async function prize(input: CommandInput, names: Commands): Promise<OutgoingMessage> {
@@ -89,7 +98,6 @@ async function prize(input: CommandInput, names: Commands): Promise<OutgoingMess
 
     if (session.scene !== 'c2c') { return message(ctx, 'common', 'privateOnly', { prizeCommand: names.prize }); }
 
-    await meta(ctx);
     const [action, short] = args;
 
     if (!action || action === '记录') {
@@ -117,7 +125,7 @@ async function prize(input: CommandInput, names: Commands): Promise<OutgoingMess
         ensure(row, 'NOT_FOUND');
         const full = await archived(ctx, 'claims', row) as Claim;
 
-        return message(ctx, 'prize', 'actionResult', { action: word(ctx, action === '领取' ? 'actionClaim' : 'actionDetails'), info: claimLine(ctx, full), detailsVersion: String(row.details_version) }, ['info']);
+        return message(ctx, 'prize', 'actionResult', { action: word(ctx, action === '领取' ? 'actionClaim' : 'actionDetails'), info: claimLine(ctx, full, names.prize), detailsVersion: String(row.details_version) }, ['info'], { details: row.state === 'CLAIMED' ? `${names.prize} 资料 ${row.short_id} ${row.details_version} ` : '' });
     }
 
     ensure(args.length === 1 && action.startsWith('P'));
@@ -126,18 +134,19 @@ async function prize(input: CommandInput, names: Commands): Promise<OutgoingMess
     ensure(row, 'NOT_FOUND');
     const full = await archived(ctx, 'claims', row) as Claim;
 
-    const instructions = piece(ctx, 'prize', row.state === 'CLAIMED' ? 'claimedInstructions' : 'pendingInstructions', { prizeCommand: names.prize, id: row.short_id, detailsVersion: String(row.details_version) });
+    const claimCommand = row.state === 'PENDING' ? `${names.prize} 领取 ${row.short_id}` : '';
+    const detailsCommand = row.state === 'CLAIMED' ? `${names.prize} 资料 ${row.short_id} ${row.details_version} ` : '';
+    const instructions = claimCommand || detailsCommand ? piece(ctx, 'prize', row.state === 'CLAIMED' ? 'claimedInstructions' : 'pendingInstructions', { prizeCommand: names.prize, id: row.short_id, detailsVersion: String(row.details_version), claimUrl: link(ctx, claimCommand), detailsUrl: link(ctx, detailsCommand, false) }, ['claimUrl', 'detailsUrl']) : '';
 
-    return message(ctx, 'prize', 'detail', { info: claimLine(ctx, full), detailsVersion: String(row.details_version), instructions }, ['info', 'instructions']);
+    return message(ctx, 'prize', 'detail', { info: claimLine(ctx, full, names.prize), detailsVersion: String(row.details_version), instructions }, ['info', 'instructions'], { claim: claimCommand, details: detailsCommand });
 }
 
-async function lottery(input: CommandInput, names: Commands, singleStage: boolean): Promise<OutgoingMessage> {
+async function lottery(input: CommandInput, names: Commands): Promise<OutgoingMessage> {
     const { ctx, session, args } = input;
     const [action, arg] = args;
     const kind = 'POOL';
     const module = 'pool';
     const command = names.pool;
-    await meta(ctx);
 
     if (action === '继续') {
         ensure(args.length === 2);
@@ -145,7 +154,7 @@ async function lottery(input: CommandInput, names: Commands, singleStage: boolea
             ctx.botId, session.userId, arg, kind);
         ensure(row, 'NOT_FOUND');
 
-        return displayDraw(ctx, await advance(ctx, row.id, singleStage), names);
+        return displayDraw(ctx, await advance(ctx, row.id, 4), names);
     }
 
     if (action === '记录') {
@@ -164,7 +173,7 @@ async function lottery(input: CommandInput, names: Commands, singleStage: boolea
         ensure(args.length === 2 && arg, 'INVALID_ARGUMENT');
         const row = await admit(ctx, session, kind, arg!, 1);
 
-        return displayDraw(ctx, await advance(ctx, row.id, singleStage), names);
+        return displayDraw(ctx, await advance(ctx, row.id, 4), names);
     }
 
     if (action === '概率') {
@@ -180,7 +189,7 @@ async function lottery(input: CommandInput, names: Commands, singleStage: boolea
 
         const items = active.map(a => piece(ctx, module, 'probabilityItem', { label: a.label, probability: (a.weight / total * 100).toFixed(4) })).join('\n') || piece(ctx, module, 'noCandidates');
 
-        return message(ctx, module, 'probability', { name: rules.name, state: word(ctx, 'pool_' + pool.state), items, time: new Date().toISOString() }, ['items']);
+        return message(ctx, module, 'probability', { name: rules.name, state: word(ctx, 'pool_' + pool.state), items, time: new Date().toISOString() }, ['items'], { buy: pool.state === 'ACTIVE' && Date.now() >= rules.starts && Date.now() < rules.ends && total > 0 ? `${names.pool} 抽 ${pool.id}` : '' });
     }
 
     if (!action) {
@@ -191,7 +200,7 @@ async function lottery(input: CommandInput, names: Commands, singleStage: boolea
         const items = pools.map(p => {
             const r = JSON.parse(p.rules) as Rules;
 
-            return piece(ctx, module, 'activityItem', { name: r.name, cost: money(r.cost), purchaseCommand: names.pool + ' 抽 ' + p.id });
+            return piece(ctx, module, 'activityItem', { name: r.name, cost: money(r.cost), purchaseCommand: names.pool + ' 抽 ' + p.id, purchaseUrl: link(ctx, names.pool + ' 抽 ' + p.id), probabilityUrl: link(ctx, names.pool + ' 概率 ' + p.id) }, ['purchaseUrl', 'probabilityUrl']);
         }).join('\n\n') || piece(ctx, module, 'noActivities');
 
         return message(ctx, module, 'activities', { items }, ['items']);
@@ -205,11 +214,12 @@ export async function command(input: CommandInput, entry: 'pool' | 'prize'): Pro
     let ctx = input.ctx;
 
     try {
-        const verifiedNow = await ready(input.ctx, true);
-        ctx = await messageContext(ctx, entry);
+        const control = await ready(input.ctx, true);
+        ctx = await messageContext(ctx, entry, control);
+        ctx = { ...ctx, config: { ...ctx.config as object, prizeNavigation: { userId: input.session.userId, scene: input.session.scene, commands: { pool: names.pool, records: names.pool + ' 记录', prizes: names.prize, history: names.prize + ' 记录', account: names.points + ' 开户' } } } };
         ensure(input.session.botId === input.ctx.botId && input.session.userId && input.session.targetId, 'IDENTITY_REQUIRED');
 
-        return entry === 'prize' ? await prize({ ...input, ctx }, names) : await lottery({ ...input, ctx }, names, verifiedNow);
+        return entry === 'prize' ? await prize({ ...input, ctx }, names) : await lottery({ ...input, ctx }, names);
     } catch (error) {
         const code = failure(error).code;
 

@@ -1,4 +1,4 @@
-import type { Ctx } from '../contracts.js';
+import type { Ctx, Meta } from '../contracts.js';
 import { CONTRACT } from '../contracts.js';
 import { ensure, Fault, meta, sql } from './db.js';
 
@@ -60,7 +60,7 @@ const statements = [
     `CREATE INDEX IF NOT EXISTS {archive_directory} ON {archive_batches}(bot_id,created_at,id)`
 ];
 
-async function verify(ctx: Ctx): Promise<void> {
+async function verify(ctx: Ctx, readOnly = false): Promise<void> {
     const tables = statements.filter(statement => statement.startsWith('CREATE TABLE'));
     const indexes = statements.filter(statement => /CREATE (UNIQUE )?INDEX/.test(statement));
     const probes = tables.map(statement => {
@@ -82,14 +82,20 @@ async function verify(ctx: Ctx): Promise<void> {
         return sql(`INSERT INTO {${table}}(${columns.join(',')}) SELECT ${columns.join(',')} FROM {${table}}
             WHERE 0 ${conflicts.join(' ')}`);
     });
-    await ctx.db.batch(probes);
+    await ctx.db.batch(readOnly ? probes.filter(probe => /INSERT INTO \{(?:draws|claims)\}/.test(probe.sql)) : probes);
     const selections = indexes.map((statement, i) => {
         const index = /INDEX IF NOT EXISTS (\{\w+\}) ON (\{\w+\})/.exec(statement)!;
         const condition = /\bWHERE ([\s\S]+)/.exec(statement)?.[1];
 
         return `(SELECT 1 FROM ${index[2]} INDEXED BY ${index[1]} ${condition ? 'WHERE ' + condition : ''} LIMIT 0) AS i${i}`;
     });
-    await ctx.db.first(`SELECT ${selections.join(',')}`);
+    const columns = tables.map((statement, i) => {
+        const table = /\{(\w+)\}/.exec(statement)![1]!;
+        const names = [...statement.matchAll(/\b(\w+)\s+(?:TEXT|INTEGER)\b/g)].map(match => match[1]);
+
+        return `(SELECT 1 FROM (SELECT ${names.join(',')} FROM {${table}} LIMIT 0)) AS t${i}`;
+    });
+    await ctx.db.first(`SELECT ${[...columns, ...selections].join(',')}`);
 }
 
 export async function install(ctx: Ctx): Promise<void> {
@@ -153,31 +159,31 @@ export async function initialize(ctx: Ctx): Promise<'VERIFYING' | 'READY'> {
     return 'VERIFYING';
 }
 
-// 返回本次是否执行结构核验；命令据此缩小资金推进量，不依赖下一次命中同一实例。
-export async function ready(ctx: Ctx, deferBusiness = false): Promise<boolean> {
+// 返回本次已核验的控制快照；READY 冷实例探测列、索引和业务互斥约束。
+export async function ready(ctx: Ctx, deferBusiness = false): Promise<Meta> {
+    let control: Meta;
+
     try {
-        await meta(ctx);
+        control = await meta(ctx);
     } catch (error) {
         if (!(error instanceof Fault) || !['SCHEMA_NOT_READY', 'SCHEMA_INITIALIZING'].includes(error.code)) { throw error; }
 
         // 创建与核验分属独立请求，避免首次使用耗尽宿主与 Points 的共享预算。
         ensure(await initialize(ctx) === 'READY' && !deferBusiness, 'SCHEMA_INITIALIZING');
 
-        return true;
+        return meta(ctx);
     }
 
     if (!verified.has(ctx.botId)) {
-        await verifyReady(ctx);
-
-        return true;
+        await verifyReady(ctx, true);
     }
 
-    return false;
+    return control;
 }
 
-async function verifyReady(ctx: Ctx): Promise<void> {
+async function verifyReady(ctx: Ctx, readOnly = false): Promise<void> {
     try {
-        await verify(ctx);
+        await verify(ctx, readOnly);
     } catch (error) {
         if (/no such (?:column|table|index)|has no column|ON CONFLICT clause does not match|no query solution/i.test(String(error))) {
             await ctx.db.run(`UPDATE {schema_meta} SET state='UNSUPPORTED',admission_enabled=0,
@@ -188,8 +194,11 @@ async function verifyReady(ctx: Ctx): Promise<void> {
         throw error;
     }
 
-    await ctx.db.run("UPDATE {schema_meta} SET state='READY' WHERE bot_id=? AND schema_version=1 AND state<>'READY'", ctx.botId);
-    await meta(ctx);
+    if (!readOnly) {
+        await ctx.db.run("UPDATE {schema_meta} SET state='READY' WHERE bot_id=? AND schema_version=1 AND state<>'READY'", ctx.botId);
+        await meta(ctx);
+    }
+
     verified.add(ctx.botId);
     ctx.logger.info(`Prize ${CONTRACT} Schema ready`);
 }

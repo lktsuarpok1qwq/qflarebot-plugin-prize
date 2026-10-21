@@ -1,7 +1,7 @@
-import { safeHttpUrl } from './config.js';
+import { safeCommandUrl, safeHttpUrl } from './config.js';
 
-// 仅用于浏览器预览的 QQ 文档子集；原始 HTML 始终转义，链接只接受 HTTP(S)。
-export function createMarkdown(safeHttpUrl: (value: unknown) => value is string) {
+// 仅用于浏览器预览的 QQ 文档子集；原始 HTML 始终转义，网页链接只接受 HTTP(S)，命令链接仅接受严格校验的 QQ 内联协议。
+export function createMarkdown(safeHttpUrl: (value: unknown) => value is string, safeCommandUrl: (value: string) => boolean) {
     return function renderQQMarkdown(source: string, markers?: { start: string; end: string }): string {
         const escape = (text: string) => text.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]!));
 
@@ -42,10 +42,10 @@ export function createMarkdown(safeHttpUrl: (value: unknown) => value is string)
                 }
 
                 const tail = text.slice(cursor);
-                const link = /^(!?)\[([^\]\n]*)\]\((https?:\/\/[^\s)]+)\)/i.exec(tail);
+                const link = /^(!?)\[([^\]\n]*)\]\(((?:https?:\/\/|mqqapi:\/\/aio\/inlinecmd\?)[^\s)]+)\)/i.exec(tail);
                 const automatic = /^<(https?:\/\/[^\s>]+)>/i.exec(tail);
 
-                if (link && safeHttpUrl(link[3])) {
+                if (link && (safeHttpUrl(link[3]) || !link[1] && safeCommandUrl(link[3]!))) {
                     const label = link[2]!, url = escape(link[3]!);
 
                     if (link[1]) {
@@ -53,6 +53,8 @@ export function createMarkdown(safeHttpUrl: (value: unknown) => value is string)
                         const alt = escape(size ? label.slice(0, size.index) : label);
                         html += '<span class="reply-image' + (selected(start + cursor, link[0].length) ? ' sample-highlight' : '') + '" data-preview-src="' + url + '" data-preview-alt="' + alt + '"'
                             + (size ? ' data-preview-width="' + size[1] + '" data-preview-height="' + size[2] + '"' : '') + '><span data-image-content>图片：' + alt + '</span> <button type="button" class="qb-btn" data-image-load>加载图片</button></span>';
+                    } else if (safeCommandUrl(link[3]!)) {
+                        html += '<button type="button" disabled title="命令链接，仅预览">' + decorated(label, start + cursor + 1) + '</button>';
                     } else {
                         html += '<a target="_blank" rel="noopener noreferrer" href="' + url + '">' + decorated(label, start + cursor + 1) + '</a>';
                     }
@@ -142,4 +144,4 @@ export function createMarkdown(safeHttpUrl: (value: unknown) => value is string)
     }
 }
 
-export const renderQQMarkdown = createMarkdown(safeHttpUrl);
+export const renderQQMarkdown = createMarkdown(safeHttpUrl, safeCommandUrl);
