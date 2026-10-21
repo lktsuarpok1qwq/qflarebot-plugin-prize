@@ -20,20 +20,20 @@ function lottery(): Record<string, TemplateField> {
     return {
         help: field('使用帮助', '入口', '🎟️ **奖池抽奖**\n\n选择奖池后购买，自动扣款并开奖\n\n⌨️ {{command}} 抽 <奖池ID>', ['command']),
         activities: field('活动列表', '入口', '🎰 **奖池列表**\n\n{{notice}}{{items}}', ['items', 'notice', 'nextCommand']),
-        activityItem: field('单个活动', '入口', '🎟️ **{{name}}**\n\n💰 每次 {{cost}} 积分\n\n[🛒 购买]({{purchaseUrl}})　[🏆 奖项]({{probabilityUrl}})', ['name', 'cost', 'purchaseCommand', 'purchaseUrl', 'probabilityUrl'], [], { message: 'activities', variable: 'items' }),
+        activityItem: field('单个活动', '入口', '🎟️ **{{name}}**\n\n💰 每次 {{cost}} 积分\n\n[🛒 购买]({{purchaseUrl}})　[🏆 奖项]({{probabilityUrl}})', ['name', 'cost', 'purchaseCommand', 'purchaseUrl', 'probabilityUrl'], [], { message: 'activities', variable: 'items', separator: '\n\n***\n\n' }),
         noActivities: field('暂无活动', '入口', '🌙 暂无开放活动', [], [], { message: 'activities', variable: 'items', when: 'empty' }),
         probability: field('奖项一览', '奖项一览', '🏆 **{{name}} · 奖项一览**\n\n💰 每次 {{cost}} 积分\n\n{{items}}\n\nℹ️ 库存变化会影响概率', ['name', 'cost', 'state', 'items', 'time']),
         probabilityItem: field('单个奖项', '奖项一览', '{{icon}} **{{label}}**\n\n🎁 奖励：{{reward}}\n\n🎲 概率：{{probability}}%', ['label', 'probability', 'reward', 'icon'], [], { message: 'probability', variable: 'items', separator: '\n\n***\n\n' }),
         noCandidates: field('暂无有效奖项', '奖项一览', '🌙 暂无有效奖项', [], [], { message: 'probability', variable: 'items', when: 'empty' }),
         pending: field('处理中', '购买结果', '⏳ **{{state}}**\n\n本笔购买已记录，请勿重复购买\n\n🔎 [结果]({{continueUrl}})\n\n🧾 {{id}}', ['state', 'id', 'continueCommand', 'continueUrl'], [], undefined, ['continue']),
         refunded: field('购买退款', '购买结果', '↩️ **购买已取消，积分已退回**\n\n🧾 {{id}}', ['id']),
-        settled: field('积分结果', '购买结果', '{{earnings}}\n\n💰 花费 {{cost}} 积分\n📈 净变化 {{net}} 积分\n\n🧾 {{id}}', ['earnings', 'cost', 'net', 'id']),
-        earned: field('积分中奖说明', '购买结果', '🎉 **获得 {{reward}} 积分**', ['reward'], [], { message: 'settled', variable: 'earnings' }),
-        noWin: field('未中奖说明', '购买结果', '🍀 **本次未中奖**', [], [], { message: 'settled', variable: 'earnings', when: 'empty' }),
-        goodsWon: field('商品中奖', '购买结果', '🎁 **获得 {{name}}**\n\n📌 {{state}}\n\n{{instructions}}', ['name', 'prizeCommand', 'state', 'instructions'], []),
+        settled: field('积分结果', '购买结果', '{{earnings}}', ['earnings', 'cost', 'net', 'id']),
+        earned: field('积分中奖说明', '购买结果', '获得 {{reward}} 积分', ['reward'], [], { message: 'settled', variable: 'earnings' }),
+        noWin: field('零奖励说明', '购买结果', '获得 0 积分', [], [], { message: 'settled', variable: 'earnings', when: 'empty' }),
+        goodsWon: field('商品中奖', '购买结果', '获得 {{name}}', ['name', 'prizeCommand', 'state', 'instructions'], []),
         records: field('本人业务记录', '记录', '📜 **抽奖记录**\n\n{{items}}', ['items', 'nextCommand'], [], undefined, ['next']),
-        recordItem: field('单笔业务记录', '记录', '📌 {{state}}\n\n💰 花费 {{cost}} 积分 · {{outcome}}\n🔎 [结果]({{continueUrl}})\n🧾 {{id}}', ['id', 'state', 'cost', 'outcome', 'continueUrl'], [], { message: 'records', variable: 'items' }),
-        recordReward: field('积分奖励说明', '奖项一览', '{{reward}} 积分', ['reward'], [], { message: 'recordItem', variable: 'outcome', also: [{ message: 'probabilityItem', variable: 'reward' }] }),
+        recordItem: field('单笔业务记录', '记录', '📌 {{state}}\n\n💰 花费 {{cost}} 积分 · {{outcome}}\n🔎 [结果]({{continueUrl}})\n🧾 {{id}}', ['id', 'state', 'cost', 'outcome', 'continueUrl'], [], { message: 'records', variable: 'items', separator: '\n\n' }),
+        recordReward: field('积分奖励说明', '奖项一览', '{{reward}} 积分', ['reward'], [], { message: 'probabilityItem', variable: 'reward', also: [{ message: 'recordItem', variable: 'outcome' }] }),
         recordPending: field('记录未完成说明', '记录', '处理中或已取消', [], [], { message: 'recordItem', variable: 'outcome', when: 'pending' }),
         recordGoods: field('记录商品中奖说明', '记录', '商品中奖', [], [], { message: 'recordItem', variable: 'outcome', when: 'goods' }),
         noRecords: field('暂无业务记录', '记录', '暂无记录', [], [], { message: 'records', variable: 'items', when: 'empty' })
@@ -45,7 +45,7 @@ export const FIELDS: Record<MessageModule, Record<string, TemplateField>> = {
     prize: {
         help: field('使用帮助', '入口', '🎁 **我的奖品**\n\n在对应奖品下领取，按需补充交付资料\n\n⌨️ {{prizeCommand}}', ['prizeCommand']),
         list: field('兑奖与历史列表', '兑奖', '🎁 **奖品记录**\n\n{{items}}', ['items', 'nextCommand'], [], undefined, ['next']),
-        item: field('单件奖品', '兑奖', '🎁 **{{name}}**\n\n📌 {{state}}\n{{deadline}}\n\n🔎 [详情]({{detailUrl}})　{{claimAction}}\n🧾 {{id}}', ['id', 'name', 'state', 'deadline', 'detailUrl', 'claimAction'], [], { message: 'list', variable: 'items', also: [{ message: 'detail', variable: 'info' }, { message: 'actionResult', variable: 'info' }] }),
+        item: field('单件奖品', '兑奖', '🎁 **{{name}}**\n\n📌 {{state}}\n{{deadline}}\n\n🔎 [详情]({{detailUrl}})　{{claimAction}}\n🧾 {{id}}', ['id', 'name', 'state', 'deadline', 'detailUrl', 'claimAction'], [], { message: 'list', variable: 'items', separator: '\n\n', also: [{ message: 'detail', variable: 'info' }, { message: 'actionResult', variable: 'info' }] }),
         deadline: field('申请期限', '兑奖', '⏰ 领取截止：{{expires}}（北京时间）', ['expires'], [], { message: 'item', variable: 'deadline' }),
         empty: field('暂无兑奖记录', '兑奖', '暂无记录', [], [], { message: 'list', variable: 'items', when: 'empty' }),
         detail: field('奖品详情', '兑奖', '{{info}}\n\n{{instructions}}', ['info', 'detailsVersion', 'instructions']),
@@ -75,7 +75,7 @@ for (const module of MODULES) {
 FIELDS.pool.activities!.scenarios = [['normal', '有奖池'], ['empty', '无奖池'], ['last', '末页']];
 FIELDS.pool.probability!.scenarios = [['normal', '有奖项'], ['empty', '无有效奖项']];
 FIELDS.pool.pending!.scenarios = [['normal', '处理中'], ['review', '待核查']];
-FIELDS.pool.settled!.scenarios = [['normal', '积分中奖'], ['empty', '未中奖']];
+FIELDS.pool.settled!.scenarios = [['normal', '积分中奖'], ['empty', '零奖励']];
 FIELDS.pool.goodsWon!.scenarios = [['normal', '待领取'], ['claimed', '待发放'], ['expired', '已过期'], ['terminal', '已结束'], ['group', '群聊指引']];
 FIELDS.pool.records!.scenarios = [['normal', '有记录'], ['empty', '无记录'], ['last', '末页']];
 FIELDS.pool.recordItem!.scenarios = [['normal', '积分结果'], ['pending', '处理中'], ['goods', '商品中奖']];

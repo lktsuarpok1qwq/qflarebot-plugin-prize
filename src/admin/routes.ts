@@ -13,7 +13,7 @@ import type { Batch } from '../archive/jobs.js';
 import { statistics } from '../archive/statistics.js';
 import type { StatisticsQuery } from '../archive/statistics.js';
 import { maintenance } from '../maintenance.js';
-import { loadTemplates, moduleName } from '../messages/templates/settings.js';
+import { loadEditorTemplates, moduleName } from '../messages/templates/settings.js';
 import { html } from '../ui/page.js';
 
 function json(value: unknown, status = 200): Response {
@@ -108,7 +108,7 @@ export const routes: Route[] = [
             }
         });
     }),
-    route('GET', '/api/messages/:module', async ({ ctx, params }) => json({ ok: true, data: await loadTemplates(ctx, moduleName(params.module)) })),
+    route('GET', '/api/messages/:module', async ({ ctx, params }) => json({ ok: true, data: await loadEditorTemplates(ctx, moduleName(params.module)) })),
     route('GET', '/api/pools', async ({ ctx, request }) => {
         const url = new URL(request.url);
         const view = url.searchParams.get('view') ?? 'all';

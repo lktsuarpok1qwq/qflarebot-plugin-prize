@@ -10,6 +10,7 @@ export function validateRules(value: unknown): Rules {
     const v: Rules = { ...input, starts: input.starts ?? 0, ends: input.ends ?? OPEN_END };
     ensure(v.kind === 'POOL');
     text(v.name, 100);
+    ensure(!/[\u0000-\u001f]/.test(v.name));
     text(v.description, 500, 0);
     integer(v.cost, 1);
     integer(v.starts, 0, OPEN_END);
@@ -26,6 +27,7 @@ export function validateRules(value: unknown): Rules {
         identifier(award.id);
         text(award.name, 120);
         text(award.label, 80);
+        ensure(!/[\u0000-\u001f]/.test(award.name + award.label));
         ensure(!ids.has(award.id));
         ids.add(award.id);
         weight += integer(award.weight, 1, 2 ** 32);

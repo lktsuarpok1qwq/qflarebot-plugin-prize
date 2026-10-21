@@ -2,7 +2,8 @@ import type { DBStatement } from '@qqbot/sdk';
 import type { Claim, Ctx, Draw, Pool, Prize, Rules, Settings, Outcome, StockView } from '../contracts.js';
 import { configurationError } from '../messages/templates/config.js';
 import type { MessageConfiguration } from '../messages/templates/config.js';
-import { moduleName } from '../messages/templates/settings.js';
+import { moduleName, templateSnapshots } from '../messages/templates/settings.js';
+import { outputError } from '../messages/templates/budget.js';
 import { CONTRACT, DAY, SOURCE } from '../contracts.js';
 import { body, ensure, integer, meta, nextArchiveAt, NOW, settings, sql, text, identifier, atomic } from '../storage/db.js';
 import { wallet } from '../points/operations.js';
@@ -75,9 +76,19 @@ export async function manage(ctx: Ctx, request: AdminRequest): Promise<Outcome> 
                 const module = moduleName(request.target);
                 const config = p.config as MessageConfiguration;
                 ensure(!configurationError(module, config), 'TEMPLATES_INVALID');
+                const related = templateSnapshots(control.settings, module === 'common' ? ['pool', 'prize'] : ['common']);
+                const common = module === 'common' ? config : related.common!.config;
+                ensure(!outputError(module, config, common), 'TEMPLATES_INVALID');
+
+                for (const [name, value] of Object.entries(related)) {
+                    ensure(name === 'common' || !outputError(name as 'pool' | 'prize', value.config, common), 'TEMPLATES_INVALID');
+                }
+
                 const path = '$.messages.' + module;
-                guard = sql(`EXISTS(SELECT 1 FROM {schema_meta} WHERE bot_id=? AND COALESCE(json_extract(settings,?),0)=?)`,
-                    ctx.botId, path + '.version', request.expectedVersion);
+                const dependencies = Object.entries(related);
+                guard = sql(`EXISTS(SELECT 1 FROM {schema_meta} WHERE bot_id=? AND COALESCE(json_extract(settings,?),0)=?
+                    ${dependencies.map(() => 'AND COALESCE(json_extract(settings,?),0)=?').join(' ')})`,
+                    ctx.botId, path + '.version', request.expectedVersion, ...dependencies.flatMap(([name, value]) => ['$.messages.' + name + '.version', value.version]));
                 templates = { version: request.expectedVersion + 1, config };
                 writes.push(sql('UPDATE {schema_meta} SET settings=json_set(settings,?,json(?)),version=version+1 WHERE bot_id=?', path, JSON.stringify(templates), ctx.botId));
                 break;

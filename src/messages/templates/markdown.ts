@@ -1,14 +1,15 @@
 import { safeCommandUrl, safeHttpUrl } from './config.js';
+import { finalizeMarkdown } from './layout.js';
 
 // 仅用于浏览器预览的 QQ 文档子集；原始 HTML 始终转义，网页链接只接受 HTTP(S)，命令链接仅接受严格校验的 QQ 内联协议。
-export function createMarkdown(safeHttpUrl: (value: unknown) => value is string, safeCommandUrl: (value: string) => boolean) {
+export function createMarkdown(safeHttpUrl: (value: unknown) => value is string, safeCommandUrl: (value: string) => boolean, format: typeof finalizeMarkdown) {
     return function renderQQMarkdown(source: string, markers?: { start: string; end: string }): string {
         const escape = (text: string) => text.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]!));
 
         // 先移除来源标记并记录原文范围，Markdown 识别始终使用无标记正文。
         const ranges: Array<{ start: number; end: number }> = [];
         let offset = 0, opened = -1;
-        const normalized = source.replace(/\r\n?/g, '\n');
+        const normalized = format(source, markers);
         source = markers ? normalized.split(new RegExp('(' + markers.start + '|' + markers.end + ')', 'g')).map(part => {
             if (part === markers.start) {
                 opened = offset;
@@ -101,7 +102,7 @@ export function createMarkdown(safeHttpUrl: (value: unknown) => value is string,
         let html = '';
         const close = () => { html += '</li></' + stack.pop()!.tag + '>'; };
 
-        let lineStart = 0;
+        let lineStart = 0, previous = '';
 
         for (const line of source.split('\n')) {
             const currentStart = lineStart;
@@ -109,8 +110,12 @@ export function createMarkdown(safeHttpUrl: (value: unknown) => value is string,
             lineStart += line.length + 1;
             const list = /^( *)([-*]|\d+\.)\s+(.*)$/.exec(line);
             const indent = /^ */.exec(line)![0].length;
+            const boundary = !previous.trim() || /^(?:#{1,2}\s|>\s?|\s*\*\s*\*\s*\*\s*$)/.test(previous);
+            previous = line;
 
-            if (list && !/^\s*(\*\s*){3,}$/.test(line)) {
+            if (list && !/^\s*(\*\s*){3,}$/.test(line) && (stack.length
+                ? stack.some(level => level.indent === indent) || indent >= stack.at(-1)!.indent + 4
+                : indent === 0 && boundary)) {
                 const tag = /^\d/.test(list[2]!) ? 'ol' : 'ul';
 
                 while (stack.length && indent < stack.at(-1)!.indent) { close(); }
@@ -126,12 +131,14 @@ export function createMarkdown(safeHttpUrl: (value: unknown) => value is string,
                 continue;
             }
 
-            if (stack.length && line.trim() && indent > stack.at(-1)!.indent) {
+            if (stack.length && line.trim() && indent >= stack.at(-1)!.indent + 4) {
                 html += '<div>' + inline(line.trim(), currentStart + line.length - line.trimStart().length) + '</div>';
                 continue;
             }
 
             while (stack.length) { close(); }
+
+            if (!line.trim()) { continue; }
 
             const heading = /^(#{1,2})\s+(.*)$/.exec(line);
 
@@ -144,4 +151,4 @@ export function createMarkdown(safeHttpUrl: (value: unknown) => value is string,
     }
 }
 
-export const renderQQMarkdown = createMarkdown(safeHttpUrl, safeCommandUrl);
+export const renderQQMarkdown = createMarkdown(safeHttpUrl, safeCommandUrl, finalizeMarkdown);

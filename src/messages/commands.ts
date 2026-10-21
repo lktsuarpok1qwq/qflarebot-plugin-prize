@@ -11,7 +11,8 @@ import { ready } from '../storage/schema.js';
 import { configuration, message, piece, word } from './templates/render.js';
 import { messageContext } from './templates/settings.js';
 import { commandUrl, escapeMarkdown } from './templates/config.js';
-import { FIELDS, type MessageModule } from './templates/fields.js';
+import type { MessageModule } from './templates/fields.js';
+import { joinItems } from './templates/layout.js';
 
 type Commands = { pool: string; prize: string; points: string };
 
@@ -95,14 +96,13 @@ async function displayDraw(ctx: Ctx, row: Draw, names: Commands): Promise<Outgoi
             prizeCommand: names.prize, name: results.find(a => a.prizeId)!.name,
             state: word(ctx, 'claim_' + state), instructions
         }, ['instructions'], {
-            claim: isPrivate && state === 'PENDING' ? claimCommand : '',
-            details: isPrivate && state === 'CLAIMED' ? `${names.prize} 资料 ${claim.short_id} ${claim.details_version} ` : ''
-        });
+            claim: claimCommand, details: `${names.prize} 资料 ${claim.short_id} ${claim.details_version} `
+        }, { claimState: state });
     }
 
     const earnings = row.reward ? piece(ctx, module, 'earned', { reward: money(row.reward) }) : piece(ctx, module, 'noWin');
 
-    return message(ctx, module, 'settled', { earnings, cost: money(row.cost), net: money(row.reward - row.cost), id: row.short_id }, ['earnings'], { buy: purchase(names, { id: row.pool_id, version: row.config_version }) });
+    return message(ctx, module, 'settled', { earnings, cost: money(row.cost), net: money(row.reward - row.cost), id: row.short_id }, ['earnings'], { buy: purchase(names, { id: row.pool_id, version: row.config_version }) }, { buyAllowed: true });
 }
 
 function recordText(ctx: Ctx, row: Draw, command: string): string {
@@ -113,12 +113,12 @@ function recordText(ctx: Ctx, row: Draw, command: string): string {
     return piece(ctx, module, 'recordItem', { id: row.short_id, state: word(ctx, 'draw_' + row.state), cost: money(row.cost), outcome, continueUrl: link(ctx, command + ' 继续 ' + row.short_id) }, ['outcome', 'continueUrl']);
 }
 
-function claimLine(ctx: Ctx, claim: Claim, command: string): string {
+function claimLine(ctx: Ctx, claim: Claim, command: string, inlineClaim = true): string {
     const name = claim.award ? (JSON.parse(claim.award) as Award).name : claim.prize_id;
     const deadline = claim.expires_at ? piece(ctx, 'prize', 'deadline', { expires: new Date(claim.expires_at + 8 * 3_600_000).toISOString().replace('T', ' ').slice(0, 19) }) : '';
 
     const state = claimState(claim);
-    const claimAction = state === 'PENDING' ? piece(ctx, 'prize', 'pendingInstructions', {
+    const claimAction = inlineClaim && state === 'PENDING' ? piece(ctx, 'prize', 'pendingInstructions', {
         prizeCommand: command, id: claim.short_id, claimUrl: link(ctx, command + ' 领取 ' + claim.short_id)
     }, ['claimUrl']) : '';
 
@@ -136,11 +136,11 @@ async function listText(ctx: Ctx, result: Awaited<ReturnType<typeof page>>, comm
     }
 
     const nextCommand = result.next ? `${command} 翻页 ${result.next}` : '';
-    const items = rows.join('\n\n') || piece(ctx, module, module === 'prize' ? 'empty' : 'noRecords');
+    const items = joinItems(module, module === 'prize' ? 'item' : 'recordItem', rows) || piece(ctx, module, module === 'prize' ? 'empty' : 'noRecords');
 
-    const claim = module === 'prize' && result.rows.length === 1 && claimState(result.rows[0] as Claim) === 'PENDING' ? result.rows[0] as Claim : undefined;
+    const claim = module === 'prize' && result.rows.length === 1 ? result.rows[0] as Claim : undefined;
 
-    return message(ctx, module, module === 'prize' ? 'list' : 'records', { items, nextCommand }, ['items'], { next: nextCommand, claim: claim ? command + ' 领取 ' + claim.short_id : '' });
+    return message(ctx, module, module === 'prize' ? 'list' : 'records', { items, nextCommand }, ['items'], { next: nextCommand, claim: claim ? command + ' 领取 ' + claim.short_id : '' }, { itemCount: result.rows.length, claimState: claim ? claimState(claim) : undefined });
 }
 
 async function prize(input: CommandInput, names: Commands): Promise<OutgoingMessage> {
@@ -176,9 +176,9 @@ async function prize(input: CommandInput, names: Commands): Promise<OutgoingMess
         const full = await archived(ctx, 'claims', row) as Claim;
 
         return message(ctx, 'prize', 'actionResult', {
-            action: word(ctx, action === '领取' ? 'actionClaim' : 'actionDetails'), info: claimLine(ctx, full, names.prize),
+            action: word(ctx, action === '领取' ? 'actionClaim' : 'actionDetails'), info: claimLine(ctx, full, names.prize, false),
             detailsVersion: String(row.details_version), instructions: claimInstructions(ctx, full, names)
-        }, ['info', 'instructions'], { details: row.state === 'CLAIMED' ? `${names.prize} 资料 ${row.short_id} ${row.details_version} ` : '' });
+        }, ['info', 'instructions'], { details: `${names.prize} 资料 ${row.short_id} ${row.details_version} ` }, { claimState: claimState(row) });
     }
 
     ensure(args.length === 1 && action.startsWith('P'));
@@ -187,11 +187,11 @@ async function prize(input: CommandInput, names: Commands): Promise<OutgoingMess
     ensure(row, 'NOT_FOUND');
     const full = await archived(ctx, 'claims', row) as Claim;
 
-    const claimCommand = claimState(row) === 'PENDING' ? `${names.prize} 领取 ${row.short_id}` : '';
-    const detailsCommand = row.state === 'CLAIMED' ? `${names.prize} 资料 ${row.short_id} ${row.details_version} ` : '';
+    const claimCommand = `${names.prize} 领取 ${row.short_id}`;
+    const detailsCommand = `${names.prize} 资料 ${row.short_id} ${row.details_version} `;
     const instructions = claimInstructions(ctx, full, names);
 
-    return message(ctx, 'prize', 'detail', { info: claimLine(ctx, full, names.prize), detailsVersion: String(row.details_version), instructions }, ['info', 'instructions'], { claim: claimCommand, details: detailsCommand });
+    return message(ctx, 'prize', 'detail', { info: claimLine(ctx, full, names.prize, false), detailsVersion: String(row.details_version), instructions }, ['info', 'instructions'], { claim: claimCommand, details: detailsCommand }, { claimState: claimState(row) });
 }
 
 async function lottery(input: CommandInput, names: Commands, control: Meta): Promise<OutgoingMessage> {
@@ -251,19 +251,19 @@ async function lottery(input: CommandInput, names: Commands, control: Meta): Pro
         const active = rules.awards.filter(a => !a.prizeId || stock.some(p => p.id === a.prizeId && p.available > 0));
         const total = active.reduce((n, a) => n + a.weight, 0);
 
-        const items = active.map(a => piece(ctx, module, 'probabilityItem', {
+        const items = joinItems(module, 'probabilityItem', active.map(a => piece(ctx, module, 'probabilityItem', {
             label: a.label, probability: probability(a.weight, total),
             icon: a.type === 'NONE' ? '🍀' : a.type === 'POINTS' ? '🪙' : a.type === 'VIRTUAL_MANUAL' ? '🎁' : '📦',
             reward: a.prizeId ? escapeMarkdown(a.name) : piece(ctx, module, 'recordReward', { reward: money(a.reward) })
-        }, ['reward'])).join(FIELDS.pool.probabilityItem!.fragment!.separator!) || piece(ctx, module, 'noCandidates');
+        }, ['reward']))) || piece(ctx, module, 'noCandidates');
 
-        return message(ctx, module, 'probability', { name: rules.name, cost: money(rules.cost), state: word(ctx, 'pool_' + pool.state), items, time: new Date().toISOString() }, ['items'], { buy: pool.state === 'ACTIVE' && Date.now() >= rules.starts && Date.now() < rules.ends && total > 0 ? purchase(names, pool) : '' });
+        return message(ctx, module, 'probability', { name: rules.name, cost: money(rules.cost), state: word(ctx, 'pool_' + pool.state), items, time: new Date().toISOString() }, ['items'], { buy: purchase(names, pool) }, { buyAllowed: pool.state === 'ACTIVE' && Date.now() >= rules.starts && Date.now() < rules.ends && total > 0 });
     }
 
     if (!action || action === '奖池') {
         ensure(args.length <= 2);
         const pools = await activePools(ctx, control, action ? arg : undefined);
-        const items = pools.rows.map(pool => poolCard(ctx, pool, names)).join('\n\n***\n\n') || piece(ctx, module, 'noActivities');
+        const items = joinItems(module, 'activityItem', pools.rows.map(pool => poolCard(ctx, pool, names))) || piece(ctx, module, 'noActivities');
         const nextCommand = pools.next ? `${command} 奖池 ${pools.next}` : '';
 
         return message(ctx, module, 'activities', { items, notice: '', nextCommand }, ['items'], { next: nextCommand });
@@ -279,8 +279,7 @@ export async function command(input: CommandInput, entry: 'pool' | 'prize'): Pro
     try {
         const control = await ready(input.ctx, true);
         ctx = await messageContext(ctx, entry, control);
-        const isPrivate = input.session.scene === 'c2c';
-        ctx = { ...ctx, config: { ...ctx.config as object, prizeNavigation: { userId: input.session.userId, scene: input.session.scene, commands: { pool: names.pool, records: names.pool + ' 记录', prizes: isPrivate ? names.prize : '', history: isPrivate ? names.prize + ' 记录' : '', account: isPrivate ? names.points + ' 开户' : '' } } } };
+        ctx = { ...ctx, config: { ...ctx.config as object, prizeNavigation: { userId: input.session.userId, scene: input.session.scene, commands: { pool: names.pool, records: names.pool + ' 记录', prizes: names.prize, history: names.prize + ' 记录', account: names.points + ' 开户' } } } };
         ensure(input.session.botId === input.ctx.botId && input.session.userId && input.session.targetId, 'IDENTITY_REQUIRED');
 
         return entry === 'prize' ? await prize({ ...input, ctx }, names) : await lottery({ ...input, ctx }, names, control);

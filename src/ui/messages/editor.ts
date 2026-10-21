@@ -2,6 +2,8 @@ import { FIELDS, MODULES, VARIABLE_HELP, WORDS } from '../../messages/templates/
 import { DEFAULTS, createTemplateTools } from '../../messages/templates/config.js';
 import { createMarkdown } from '../../messages/templates/markdown.js';
 import { createTemplatePreview } from '../../messages/templates/preview.js';
+import { createMessageLayout } from '../../messages/templates/layout.js';
+import { createOutputBudget } from '../../messages/templates/budget.js';
 import { TEXT_EDITOR_SCRIPT } from './text.js';
 import { IMAGE_EDITOR_SCRIPT } from './images.js';
 import { messageButtons } from './buttons.js';
@@ -10,8 +12,10 @@ const json = (value: unknown) => JSON.stringify(value).replace(/</g, '\\u003c');
 export const messagesUI = [
     'const FIELDS=' + json(FIELDS) + ', MODULES=' + json(MODULES) + ', DEFAULTS=' + json(DEFAULTS) + ', WORDS=' + json(WORDS) + ', VARIABLE_HELP=' + json(VARIABLE_HELP) + ';',
     'const {configurationError,templateError,renderTemplate,escapeMarkdown,safeHttpUrl,commandUrl,safeCommandUrl}=(' + createTemplateTools.toString() + ')(FIELDS,WORDS);',
-    'const renderQQMarkdown=(' + createMarkdown.toString() + ')(safeHttpUrl,safeCommandUrl);',
-    'const previewText=(' + createTemplatePreview.toString() + ')(FIELDS,{escapeMarkdown,renderTemplate,commandUrl});',
+    'const messageLayout=(' + createMessageLayout.toString() + ')(FIELDS);',
+    'const outputError=(' + createOutputBudget.toString() + ')(FIELDS,messageLayout.finalizeMarkdown);',
+    'const renderQQMarkdown=(' + createMarkdown.toString() + ')(safeHttpUrl,safeCommandUrl,messageLayout.finalizeMarkdown);',
+    'const previewText=(' + createTemplatePreview.toString() + ')(FIELDS,{escapeMarkdown,renderTemplate,commandUrl,layout:messageLayout,defaultCommon:DEFAULTS.common,outputError});',
     TEXT_EDITOR_SCRIPT, IMAGE_EDITOR_SCRIPT, messageButtons,
     String.raw`
 const messageEditor = (() => {
@@ -42,7 +46,7 @@ const messageEditor = (() => {
     const tools = [
         ['一级标题', '# ', '', '标题', false, true], ['二级标题', '## ', '', '标题', false, true],
         ['加粗', '**', '**'], ['斜体', '*', '*'], ['粗斜体', '***', '***'], ['删除线', '~~', '~~'],
-        ['引用', '> ', '', '引用', false, true], ['无序列表', '- ', '', '条目', false, true], ['有序列表', '1. ', '', '条目', false, true], ['嵌套列表', '  - ', '', '条目', false, true],
+        ['引用', '> ', '', '引用', false, true], ['无序列表', '- ', '', '条目', false, true], ['有序列表', '1. ', '', '条目', false, true], ['嵌套列表', '    - ', '', '条目', false, true],
         ['链接', '[', '](https://example.com)'], ['图片', '![', '](https://example.com/image.png)', '图片说明'], ['分割线', '\n***\n', '', '', true]
     ];
     tools.forEach(([label, ...args]) => {
@@ -70,11 +74,43 @@ const messageEditor = (() => {
         active.positions.set(active.key, { start: body.selectionStart, end: body.selectionEnd, top: body.scrollTop, direction: body.selectionDirection, scenario: $('reply-scenario').value });
     }
 
+    function common(model) {
+        return model.module === 'common' ? model.draft : model.related.common.config;
+    }
+
+    function validation(model, selected) {
+        const basic = configurationError(model.module, model.draft, selected);
+
+        if (basic) { return basic; }
+
+        const expanded = outputError(model.module, model.draft, common(model), selected);
+
+        if (expanded || model.module !== 'common') { return expanded; }
+
+        for (const [module, snapshot] of Object.entries(model.related)) {
+            const error = outputError(module, snapshot.config, model.draft);
+
+            if (error) { return { ...error, field: 'error', message: names[module] + '：' + error.message }; }
+        }
+
+        return null;
+    }
+
+    function notify(module, snapshot) {
+        for (const model of models.values()) {
+            if (model.related?.[module] && snapshot.version >= model.related[module].version) {
+                model.related[module] = clone(snapshot);
+
+                if (visible(model)) { preview(); }
+            }
+        }
+    }
+
     function scenarios() {
         const model = active;
         let choices;
 
-        try { choices = previewText.scenarios(model.module, model.draft, model.key); } catch { choices = FIELDS[model.module][model.key].scenarios || [['normal', '默认']]; }
+        try { choices = previewText.scenarios(model.module, model.draft, model.key, common(model)); } catch { choices = FIELDS[model.module][model.key].scenarios || [['normal', '默认']]; }
 
         const before = $('reply-scenario').value || model.positions.get(model.key)?.scenario;
         $('reply-scenario').replaceChildren();
@@ -87,7 +123,7 @@ const messageEditor = (() => {
         if (!active?.draft) { return; }
 
         scenarios();
-        const model = active, field = FIELDS[model.module][model.key], error = configurationError(model.module, model.draft, model.key);
+        const model = active, field = FIELDS[model.module][model.key], error = validation(model, model.key);
         const textError = error?.field === model.key && error.target === 'text';
         $('reply-body').setAttribute('aria-invalid', String(!!textError));
         $('reply-error').hidden = !error;
@@ -97,19 +133,16 @@ const messageEditor = (() => {
         const token = '\uE000' + crypto.randomUUID(), markers = { start: token + 'S\uE001', end: token + 'E\uE001' };
 
         try {
-            const result = previewText(model.module, model.draft, model.key, model.mode, $('reply-scenario').value, markers);
+            const result = previewText(model.module, model.draft, model.key, model.mode, $('reply-scenario').value, markers, common(model));
             $('reply-preview-text').innerHTML = renderQQMarkdown(result.text, model.mode === 'sample' && field.fragment ? markers : undefined);
             $('reply-preview-title').textContent = '即时预览 · ' + (model.mode === 'sample' || !field.fragment ? '完整消息' : '当前片段');
             $('reply-preview-buttons').replaceChildren();
 
-            for (const row of model.draft.buttons[result.root] || []) {
+            for (const row of result.buttons) {
                 const line = node('div', undefined, 'actions');
                 row.forEach(item => {
-                    if (result.hiddenActions?.includes(item.action)) { return; }
-
-                    if (item.action === 'next' && ['empty', 'last'].includes($('reply-scenario').value)) { return; }
-
                     const b = node('button', item.label);
+                    b.title = item.type === 'link' ? '打开链接' : item.enter ? '直接发送命令' : '填入输入框';
                     b.disabled = true;
                     line.append(b);
                 });
@@ -147,7 +180,7 @@ const messageEditor = (() => {
             const parts = Object.entries(FIELDS[active.module]).filter(([, f]) => f.fragment?.message === active.key && f.fragment.variable === name || f.fragment?.also?.some(use => use.message === active.key && use.variable === name));
 
             if (parts.length) {
-                const detail = node('details', undefined, 'reply-variable-composition'), description = node('p', '按当前片段草稿组成；多个列表项以空行连接。以下仅供参考，不增加正文可用变量', 'muted');
+                const detail = node('details', undefined, 'reply-variable-composition'), description = node('p', '按当前片段草稿及实际列表分隔规则组成。以下仅供参考，不增加正文可用变量', 'muted');
                 const fields = node('dl');
                 const seen = new Set();
                 parts.forEach(([, f]) => f.variables.forEach(variable => {
@@ -255,11 +288,17 @@ const messageEditor = (() => {
 
         if (!Number.isSafeInteger(result?.version) || result.version < 0 || configurationError(model.module, result.config)) { throw new Error('模板响应不完整，草稿已保留'); }
 
+        const dependencies = model.module === 'common' ? ['pool', 'prize'] : ['common'];
+
+        if (!result.related || dependencies.some(module => !Number.isSafeInteger(result.related[module]?.version) || result.related[module].version < 0 || configurationError(module, result.related[module].config))) { throw new Error('关联文案响应不完整，草稿已保留'); }
+
         if (model.serial !== serial) { return; }
 
         model.baseline = clone(result.config);
         model.draft = clone(result.config);
         model.version = result.version;
+        model.related = clone(result.related);
+        notify(model.module, { version: model.version, config: model.baseline });
 
         if (visible(model)) {
             $('reply-controls').hidden = false;
@@ -309,7 +348,7 @@ const messageEditor = (() => {
         }
     });
     $('reply-save').onclick = () => run(async () => {
-        const model = active, error = configurationError(model.module, model.draft);
+        const model = active, error = validation(model);
 
         if (error) {
             edit(error.field);
@@ -330,6 +369,7 @@ const messageEditor = (() => {
 
             model.version = result.version;
             model.baseline = clone(result.templates.config);
+            notify(model.module, { version: model.version, config: model.baseline });
 
             if (model.serial === serial) { model.draft = clone(result.templates.config); }
 
