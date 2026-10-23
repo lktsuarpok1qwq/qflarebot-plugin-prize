@@ -47,8 +47,8 @@ function validateRequest(action, target, version, params) {
             if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(a.id) || !bounded(a.name, 120) || !bounded(a.label, 80)
                 || !validInteger(a.weight, 1, 2 ** 32) || !validInteger(a.reward, 0, 1e12)
                 || a.type === 'NONE' && a.reward !== 0 || a.type === 'POINTS' && a.reward <= 0
-                || a.prizeId !== undefined && (r.kind !== 'POOL' || !/^[A-Za-z][A-Za-z0-9_-]*$/.test(a.prizeId) || !validInteger(a.claimHours, 1, 8760) || a.reward !== 0)) {
-                throw new Error('请检查奖项的编号、名称、公开标签、奖励及商品资料');
+                || a.prizeId !== undefined && (r.kind !== 'POOL' || !/^[A-Za-z][A-Za-z0-9_-]*$/.test(a.prizeId) || a.reward !== 0)) {
+                throw new Error('请检查奖项的编号、名称、公开标签、奖励及商品绑定');
             }
         }
     }
@@ -94,7 +94,7 @@ function createRuleEditor() {
     };
     page$(resumeId).onclick = () => run(showEditor);
     $('poolEditor').querySelector('h2').firstChild.textContent = '奖池规则 ';
-    $('loadProducts').onclick = () => run(() => loadCatalog('prizes'));
+    $('loadProducts').onclick = () => run(() => loadCatalog('prizes', false, 'awards'));
 
     function syncTime() {
         for (const id of ['starts', 'ends']) { $(id).disabled = state.busy || !$('timeEnabled').checked; }
@@ -111,8 +111,6 @@ function createRuleEditor() {
 
                 if (type === 'PHYSICAL' || type === 'VIRTUAL_MANUAL') {
                     a.prizeId = get('prizeId');
-                    a.claimHours = Number(get('claimHours'));
-                    a.expiry = get('expiry');
                 }
 
                 return a;
@@ -164,7 +162,7 @@ function createRuleEditor() {
         row.dataset.name = a.name;
         const grid = node('div', undefined, 'grid');
 
-        for (const [key, label, type, options] of [['id', '', 'hidden'], ['label', '公开标签', 'text'], ['type', '类型', 'select', ['NONE', 'POINTS', 'VIRTUAL_MANUAL', 'PHYSICAL']], ['weight', '权重', 'number'], ['reward', '奖励（积分）', 'number'], ['prizeId', '商品', 'select', []], ['claimHours', '申请期限（小时）', 'number'], ['expiry', '过期库存', 'select', ['RETURN', 'RETIRE']]]) {
+        for (const [key, label, type, options] of [['id', '', 'hidden'], ['label', '公开标签', 'text'], ['type', '类型', 'select', ['NONE', 'POINTS', 'VIRTUAL_MANUAL', 'PHYSICAL']], ['weight', '权重', 'number'], ['reward', '奖励（积分）', 'number'], ['prizeId', '商品', 'select', []]]) {
             const wrap = node('label', label);
             wrap.hidden = type === 'hidden';
             const control = node(type === 'select' ? 'select' : 'input');
@@ -172,7 +170,7 @@ function createRuleEditor() {
 
             if (type === 'select') {
                 for (const v of options) {
-                    const opt = node('option', ({ NONE: '未中奖', POINTS: '积分', PHYSICAL: '其他', VIRTUAL_MANUAL: '虚拟奖品', RETURN: '回到可用库存', RETIRE: '退出可抽库存' })[v] || v);
+                    const opt = node('option', ({ NONE: '未中奖', POINTS: '积分', PHYSICAL: '其他', VIRTUAL_MANUAL: '虚拟奖品' })[v] || v);
                     opt.value = v;
                     control.append(opt);
                 }
@@ -186,7 +184,7 @@ function createRuleEditor() {
                 }
             }
 
-            control.value = key === 'reward' ? String(a.reward / 100) : a[key] ?? (key === 'claimHours' ? 168 : key === 'expiry' ? 'RETURN' : '');
+            control.value = key === 'reward' ? String(a.reward / 100) : a[key] ?? '';
 
             if (key === 'prizeId') { fillProducts(control, a.prizeId || ''); }
 
@@ -210,7 +208,7 @@ function createRuleEditor() {
             row.dataset.awardType = type;
             const goods = type === 'PHYSICAL' || type === 'VIRTUAL_MANUAL';
 
-            for (const field of ['prizeId', 'claimHours', 'expiry']) {
+            for (const field of ['prizeId']) {
                 const input = row.querySelector('[data-field=' + field + ']');
                 input.parentElement.hidden = !goods;
                 input.required = goods;

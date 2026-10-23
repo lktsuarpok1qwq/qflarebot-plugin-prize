@@ -1,22 +1,27 @@
-import { FIELDS, MODULES, VARIABLE_HELP, WORDS } from '../../messages/templates/fields.js';
+import { AWARD_ICONS, FIELDS, MODULES, VARIABLE_HELP, WORDS } from '../../messages/templates/fields.js';
 import { DEFAULTS, createTemplateTools } from '../../messages/templates/config.js';
 import { createMarkdown } from '../../messages/templates/markdown.js';
 import { createTemplatePreview } from '../../messages/templates/preview.js';
 import { createMessageLayout } from '../../messages/templates/layout.js';
 import { createOutputBudget } from '../../messages/templates/budget.js';
+import { createMessageValidation } from '../../messages/templates/validation.js';
+import { EDITOR_COMMANDS, createEditorNavigation } from '../../messages/templates/navigation.js';
+import { messageComposition } from './composition.js';
 import { TEXT_EDITOR_SCRIPT } from './text.js';
 import { IMAGE_EDITOR_SCRIPT } from './images.js';
 import { messageButtons } from './buttons.js';
 
 const json = (value: unknown) => JSON.stringify(value).replace(/</g, '\\u003c');
 export const messagesUI = [
-    'const FIELDS=' + json(FIELDS) + ', MODULES=' + json(MODULES) + ', DEFAULTS=' + json(DEFAULTS) + ', WORDS=' + json(WORDS) + ', VARIABLE_HELP=' + json(VARIABLE_HELP) + ';',
-    'const {configurationError,templateError,renderTemplate,escapeMarkdown,safeHttpUrl,commandUrl,safeCommandUrl}=(' + createTemplateTools.toString() + ')(FIELDS,WORDS);',
+    'const FIELDS=' + json(FIELDS) + ', MODULES=' + json(MODULES) + ', DEFAULTS=' + json(DEFAULTS) + ', WORDS=' + json(WORDS) + ', ICONS=' + json(AWARD_ICONS) + ', EDITOR_COMMANDS=' + json(EDITOR_COMMANDS) + ', VARIABLE_HELP=' + json(VARIABLE_HELP) + ';',
+    'const {awardIcon,configurationError,templateError,renderTemplate,escapeMarkdown,safeHttpUrl,commandUrl,safeCommandUrl}=(' + createTemplateTools.toString() + ' )(FIELDS,WORDS,ICONS);',
+    'const navigation=(' + createEditorNavigation.toString() + ')(FIELDS,EDITOR_COMMANDS);',
     'const messageLayout=(' + createMessageLayout.toString() + ')(FIELDS);',
-    'const outputError=(' + createOutputBudget.toString() + ')(FIELDS,messageLayout.finalizeMarkdown);',
+    'const outputError=(' + createOutputBudget.toString() + ')(FIELDS,messageLayout.finalizeMarkdown,messageLayout.separatorFor,awardIcon,messageLayout.fragmentCandidates);',
     'const renderQQMarkdown=(' + createMarkdown.toString() + ')(safeHttpUrl,safeCommandUrl,messageLayout.finalizeMarkdown);',
-    'const previewText=(' + createTemplatePreview.toString() + ')(FIELDS,{escapeMarkdown,renderTemplate,commandUrl,layout:messageLayout,defaultCommon:DEFAULTS.common,outputError});',
-    TEXT_EDITOR_SCRIPT, IMAGE_EDITOR_SCRIPT, messageButtons,
+    'const previewText=(' + createTemplatePreview.toString() + ')(FIELDS,{escapeMarkdown,renderTemplate,commandUrl,layout:messageLayout,defaultCommon:DEFAULTS.common,outputError,awardIcon,navigation});',
+    'const messageError=(' + createMessageValidation.toString() + ')(FIELDS,configurationError,outputError,previewText);',
+    TEXT_EDITOR_SCRIPT, IMAGE_EDITOR_SCRIPT, messageButtons, messageComposition,
     String.raw`
 const messageEditor = (() => {
     const models = new Map();
@@ -34,9 +39,11 @@ const messageEditor = (() => {
     };
     const restoreImages = createPreviewImages($('reply-preview-text'));
     const buttons = createMessageButtons(current, changed);
+    const composition = createMessageComposition({ FIELDS, ICONS, messageLayout, awardIcon, navigation, current, edit, changed, $, node, createTextTools });
     const textTools = createTextTools($('reply-body'), () => {
         if (active) {
             active.draft.replies[active.key] = $('reply-body').value;
+            composition.related();
             active.serial++;
             preview();
         }
@@ -61,7 +68,7 @@ const messageEditor = (() => {
         restoreImages();
         const model = active;
         $('reply-status').textContent = state.busy && model ? '正在处理…' : !model?.baseline ? '尚未加载' : dirty(model) ? '有未保存的修改' : '暂无未保存修改';
-        $('reply-load').textContent = model?.baseline ? '重新加载' : '加载模板';
+        syncLoadButton('reply-load', !!model?.baseline);
         $('reply-save').disabled = state.busy || !dirty(model) || !!state.pending;
         $('reply-discard').disabled = state.busy || !dirty(model);
         $('reply-default').disabled = state.busy || !model?.baseline;
@@ -71,7 +78,9 @@ const messageEditor = (() => {
         if (!active?.rendered) { return; }
 
         const body = $('reply-body');
-        active.positions.set(active.key, { start: body.selectionStart, end: body.selectionEnd, top: body.scrollTop, direction: body.selectionDirection, scenario: $('reply-scenario').value });
+        const separators = Object.fromEntries([...$('reply-separator-fields').querySelectorAll('textarea')].map(input => [input.dataset.separator, { start: input.selectionStart, end: input.selectionEnd, top: input.scrollTop }]));
+        active.branches.set(active.command, active.key);
+        active.positions.set(active.command + '/' + active.key, { start: body.selectionStart, end: body.selectionEnd, top: body.scrollTop, direction: body.selectionDirection, scenario: $('reply-scenario').value, separators });
     }
 
     function common(model) {
@@ -79,16 +88,14 @@ const messageEditor = (() => {
     }
 
     function validation(model, selected) {
-        const basic = configurationError(model.module, model.draft, selected);
-
-        if (basic) { return basic; }
-
-        const expanded = outputError(model.module, model.draft, common(model), selected);
+        const root = selected ? navigation.context(model.module, model.command, selected).root : undefined;
+        const expanded = (selected ? configurationError(model.module, model.draft, selected) : null)
+            || messageError(model.module, model.draft, common(model), root);
 
         if (expanded || model.module !== 'common') { return expanded; }
 
         for (const [module, snapshot] of Object.entries(model.related)) {
-            const error = outputError(module, snapshot.config, model.draft);
+            const error = messageError(module, snapshot.config, model.draft);
 
             if (error) { return { ...error, field: 'error', message: names[module] + '：' + error.message }; }
         }
@@ -110,9 +117,11 @@ const messageEditor = (() => {
         const model = active;
         let choices;
 
-        try { choices = previewText.scenarios(model.module, model.draft, model.key, common(model)); } catch { choices = FIELDS[model.module][model.key].scenarios || [['normal', '默认']]; }
+        try { choices = previewText.scenarios(model.module, model.draft, model.key, common(model), model.command); } catch { choices = FIELDS[model.module][model.key].scenarios || [['normal', '默认']]; }
 
-        const before = $('reply-scenario').value || model.positions.get(model.key)?.scenario;
+        if (!choices.length) { choices = [['normal', '默认']]; }
+
+        const before = $('reply-scenario').value || model.positions.get(model.command + '/' + model.key)?.scenario;
         $('reply-scenario').replaceChildren();
         choices.forEach(([value, label]) => option($('reply-scenario'), value, label));
         $('reply-scenario').value = choices.some(([v]) => v === before) ? before : choices[0][0];
@@ -126,14 +135,16 @@ const messageEditor = (() => {
         const model = active, field = FIELDS[model.module][model.key], error = validation(model, model.key);
         const textError = error?.field === model.key && error.target === 'text';
         $('reply-body').setAttribute('aria-invalid', String(!!textError));
-        $('reply-error').hidden = !error;
-        $('reply-error').textContent = error ? error.message + (textError ? '（第 ' + model.draft.replies[model.key].slice(0, error.start).split('\n').length + ' 行）' : '') : '';
-        $('reply-words-fields').querySelectorAll('input').forEach(input => input.setAttribute('aria-invalid', String(error?.target === 'words' && error.control === input.dataset.word)));
+        $('reply-error').hidden = error?.target !== 'text';
+        $('reply-error').textContent = error?.target === 'text' ? error.message + (textError ? '（第 ' + model.draft.replies[model.key].slice(0, error.start).split('\n').length + ' 行）' : '') : '';
+        $('reply-words-fields').querySelectorAll('input').forEach(input => fieldError(input, error?.target === 'words' && error.control === input.dataset.word ? error.message : ''));
         buttons.validate(error?.target === 'buttons' ? error : null);
+        $('reply-separator-fields').querySelectorAll('textarea').forEach(input => fieldError(input, error?.target === 'separator' && error.field === input.dataset.separator ? error.message : ''));
+        $('reply-icon-fields').querySelectorAll('input').forEach(input => fieldError(input, error?.target === 'icon' && error.control === input.dataset.icon ? error.message : ''));
         const token = '\uE000' + crypto.randomUUID(), markers = { start: token + 'S\uE001', end: token + 'E\uE001' };
 
         try {
-            const result = previewText(model.module, model.draft, model.key, model.mode, $('reply-scenario').value, markers, common(model));
+            const result = previewText(model.module, model.draft, model.key, model.mode, $('reply-scenario').value, markers, common(model), model.command);
             $('reply-preview-text').innerHTML = renderQQMarkdown(result.text, model.mode === 'sample' && field.fragment ? markers : undefined);
             $('reply-preview-title').textContent = '即时预览 · ' + (model.mode === 'sample' || !field.fragment ? '完整消息' : '当前片段');
             $('reply-preview-buttons').replaceChildren();
@@ -142,6 +153,8 @@ const messageEditor = (() => {
                 const line = node('div', undefined, 'actions');
                 row.forEach(item => {
                     const b = node('button', item.label);
+                    b.dataset.messageStyle = String(item.style);
+                    b.className = 'reply-message-button';
                     b.title = item.type === 'link' ? '打开链接' : item.enter ? '直接发送命令' : '填入输入框';
                     b.disabled = true;
                     line.append(b);
@@ -208,6 +221,7 @@ const messageEditor = (() => {
         Object.entries(WORDS).forEach(([key, info]) => {
             const label = node('label', info.title), input = node('input');
             input.dataset.word = key;
+            input.id = 'reply-word-' + key;
             input.value = active.draft.words[key];
             input.oninput = () => {
                 active.draft.words[key] = input.value;
@@ -223,27 +237,31 @@ const messageEditor = (() => {
 
         const model = active;
         model.key = key;
-        const fields = FIELDS[model.module], field = fields[key], groups = [...new Set(Object.values(fields).map(f => f.group))];
+        const fields = FIELDS[model.module], field = fields[key];
+        const context = navigation.context(model.module, model.command, key);
+        model.command = context.id;
         $('reply-group').replaceChildren();
-        groups.forEach(group => option($('reply-group'), group, group));
-        $('reply-group').value = field.group;
-        const branches = Object.keys(fields).filter(k => fields[k].group === field.group);
+        EDITOR_COMMANDS[model.module].forEach(command => option($('reply-group'), command.id, command.title));
+        $('reply-group').value = context.id;
+        $('reply-group-field').hidden = EDITOR_COMMANDS[model.module].length === 1;
+        const branches = navigation.entries(model.module, context.id);
         $('reply-key').replaceChildren();
-        branches.forEach(key => option($('reply-key'), key, fields[key].title));
+        branches.forEach(({ key, root }) => option($('reply-key'), key, fields[key].title + (fields[key].fragment ? ' · ' + fields[root].title : ' · 完整消息')));
         $('reply-key').value = key;
         $('reply-key-field').hidden = branches.length === 1;
-        $('reply-group').parentElement.hidden = groups.length === 1;
-        $('reply-body-label').textContent = '模板正文' + (branches.length === 1 ? ' · ' + field.title : '');
+        $('reply-body-label').textContent = '模板正文' + (EDITOR_COMMANDS[model.module].length === 1 ? ' · ' + context.title : '') + (branches.length === 1 ? ' · ' + field.title : '');
         $('reply-body').value = model.draft.replies[key];
-        $('reply-uses').textContent = field.fragment ? '共享片段 · 用于“' + [field.fragment.message, ...(field.fragment.also || []).map(use => use.message)].map(key => fields[key].title).join('、') + '”，保存后全部引用生效' : '用于“' + field.title + '”消息';
+        const uses = EDITOR_COMMANDS[model.module].filter(command => navigation.entries(model.module, command.id).some(item => item.key === key));
+        $('reply-uses').textContent = '当前：' + context.title + ' → ' + field.title + (uses.length > 1 ? '。共享模板，保存后同时用于：' + uses.map(use => use.title).join('；') : '');
         $('reply-buttons-section').hidden = !!field.fragment;
+        composition.render();
         variables(field);
         buttons.draw();
         words();
         $('reply-scenario').value = '';
         preview();
         model.rendered = true;
-        const position = model.positions.get(key), body = $('reply-body');
+        const position = model.positions.get(model.command + '/' + key), body = $('reply-body');
 
         if (position) {
             body.setSelectionRange(Math.min(position.start, body.value.length), Math.min(position.end, body.value.length), position.direction);
@@ -256,7 +274,7 @@ const messageEditor = (() => {
 
         currentModule = module;
 
-        if (!models.has(module)) { models.set(module, { module, key: Object.keys(FIELDS[module])[0], baseline: null, draft: null, version: 0, serial: 0, positions: new Map(), mode: 'sample', rendered: false }); }
+        if (!models.has(module)) { models.set(module, { module, command: null, key: Object.keys(FIELDS[module])[0], baseline: null, draft: null, version: 0, serial: 0, positions: new Map(), branches: new Map(), mode: 'sample', rendered: false }); }
 
         active = models.get(module);
         document.querySelectorAll('[data-panel]').forEach(panel => panel.hidden = true);
@@ -284,7 +302,7 @@ const messageEditor = (() => {
 
         if (dirty(model) && !await confirm('重新加载会丢弃本模块全部模板草稿，是否继续？')) { return; }
 
-        const response = await api('/api/messages/' + model.module), result = response.data;
+        const response = await readRegion('reply-controls', () => api('/api/messages/' + model.module)), result = response.data;
 
         if (!Number.isSafeInteger(result?.version) || result.version < 0 || configurationError(model.module, result.config)) { throw new Error('模板响应不完整，草稿已保留'); }
 
@@ -306,9 +324,14 @@ const messageEditor = (() => {
         }
     });
     $('reply-key').onchange = () => edit($('reply-key').value);
-    $('reply-group').onchange = () => edit(Object.keys(FIELDS[active.module]).find(key => FIELDS[active.module][key].group === $('reply-group').value));
+    $('reply-group').onchange = () => {
+        remember();
+        active.command = $('reply-group').value;
+        edit(active.branches.get(active.command) || navigation.entries(active.module, active.command)[0].key, false);
+    };
     $('reply-body').oninput = () => {
         active.draft.replies[active.key] = $('reply-body').value;
+        composition.related();
         changed();
     };
     $('reply-body').addEventListener('select', remember);
@@ -325,9 +348,12 @@ const messageEditor = (() => {
     $('reply-default').onclick = () => run(async () => {
         const model = active, key = model.key;
 
-        if (!await confirm('恢复“' + FIELDS[model.module][key].title + '”的默认草稿？' + (model.module === 'common' && key === 'error' ? '包含状态与错误用语，' : '') + '保存后生效')) { return; }
+        if (!await confirm('恢复“' + FIELDS[model.module][key].title + '”的默认草稿？' + (model.module === 'common' && key === 'error' ? '包含状态与错误用语，' : '') + (composition.iconKeys(model) ? '包含四种奖项类型图标，' : '') + (composition.separatorKeys(model).length ? '包含当前项目间隔，' : '') + '保存后生效')) { return; }
 
         model.draft.replies[key] = DEFAULTS[model.module].replies[key];
+        composition.separatorKeys(model).forEach(key => composition.setSeparator(key, FIELDS[model.module][key].fragment.separator, model));
+
+        if (composition.iconKeys(model)) { delete model.draft.icons; }
 
         if (model.draft.buttons[key]) { model.draft.buttons[key] = clone(DEFAULTS[model.module].buttons[key]); }
 
@@ -355,10 +381,11 @@ const messageEditor = (() => {
 
             if (error.target === 'words') { $('reply-words').open = true; }
 
-            const input = error.target === 'text' ? $('reply-body') : error.target === 'words' ? $('reply-words-fields').querySelector('[data-word="' + error.control + '"]') : buttons.validate(error);
+            const input = error.target === 'text' ? $('reply-body') : error.target === 'separator' ? $('reply-separator-fields').querySelector('[data-separator="' + error.field + '"]') : error.target === 'icon' ? $('reply-icon-fields').querySelector('[data-icon="' + error.control + '"]') : error.target === 'words' ? $('reply-words-fields').querySelector('[data-word="' + error.control + '"]') : buttons.validate(error);
+            state.focusAfter = input;
             input?.focus();
 
-            if (input === $('reply-body')) { input.setSelectionRange(error.start, error.end); }
+            if (input === $('reply-body') || error.target === 'separator') { input?.setSelectionRange(error.start, error.end); }
 
             throw new Error(error.message);
         }

@@ -2,10 +2,9 @@ export const settingsUI = String.raw`
 function renderStatus() {
     const c = state.control;
     const paused = c.settings.paused;
-    $('admission').textContent = paused ? '抽奖已暂停' : !c.admission ? '待授权' : c.error ? '后台任务异常' : '服务正常';
     const missing = c.missingPermissions || [];
     const points = !c.policy?.registered ? '积分：正在准备，请刷新' : !c.policy.enabled ? '积分：请在 Points 启用 Prize'
-        : missing.length ? '积分：请在 Points 授权' + missing.map(name => ({ burn: '销毁', reverseOwn: '本来源完整冲正' })[name] || name).join('、') : '积分：已就绪';
+        : missing.length ? '积分：请在 Points 授权' + missing.map(name => ({ burn: '销毁', reverseOwn: '本来源完整冲正', balance: '余额读取' })[name] || name).join('、') : '积分：已就绪';
     $('statusSummary').replaceChildren(...[
         paused ? '抽奖：已暂停' : c.admission ? '抽奖：按活动设置开放' : '抽奖：待授权',
         points, '待处理：' + c.queue.reduce((sum, row) => sum + row.count, 0) + ' 笔' + (c.error ? '（后台任务异常，请查看诊断信息）' : '')
@@ -19,6 +18,8 @@ function settingsValue() { return { paused: state.control?.settings.paused === t
 function syncDirty() {
     if (typeof messageEditor !== 'undefined') { messageEditor.sync(); }
 
+    document.querySelectorAll('[data-load-action]').forEach(control => { control.disabled = state.busy; });
+
     if (state.control) {
         $('enable').disabled = state.busy || !state.control.settings.paused && state.control.admission;
         $('disable').disabled = state.busy || state.control.settings.paused;
@@ -27,6 +28,7 @@ function syncDirty() {
     ruleEditors.forEach(editor => editor.syncDirty());
     syncStockControls();
     const dirty = state.settingsBaseline !== null && JSON.stringify(settingsValue()) !== state.settingsBaseline;
+    $('settingsFields').disabled = state.busy || state.settingsBaseline === null;
     $('settingsDirty').textContent = dirty ? '有未保存修改' : '';
     $('saveSettings').disabled = state.busy || !dirty;
     $('resetSettings').disabled = state.busy || !dirty;
@@ -38,14 +40,16 @@ $('loadState').onclick = () => run(async () => {
     const epoch = state.epoch;
     let result;
 
-    for (let phase = 0; phase < 2; phase++) {
-        try {
-            result = await api('/api/state');
-            break;
-        } catch (error) {
-            if (phase || error.result?.code !== 'SCHEMA_INITIALIZING') { throw error; }
+    await readRegion('statusSummary', async () => {
+        for (let phase = 0; phase < 2; phase++) {
+            try {
+                result = await api('/api/state');
+                break;
+            } catch (error) {
+                if (phase || error.result?.code !== 'SCHEMA_INITIALIZING') { throw error; }
+            }
         }
-    }
+    });
 
     if (epoch !== state.epoch) { return; }
 
@@ -66,6 +70,7 @@ $('loadState').onclick = () => run(async () => {
     $('retentionField').hidden = !c.settings.archiveEnabled;
     $('stateResult').textContent = JSON.stringify(c, null, 2);
     renderStatus();
+    syncLoadButton('loadState', true);
 
     for (const id of ['maintenance']) { $(id).disabled = false; }
 
@@ -108,6 +113,8 @@ $('resetSettings').onclick = () => {
 $('settingsForm').onsubmit = event => {
     event.preventDefault();
     run(async () => {
+        if (state.settingsBaseline === null || !state.control) { throw new Error('请先加载状态'); }
+
         const config = settingsValue();
         await write('settings', 'prize', state.control.version, config, '保存高级设置？', result => {
             if (state.control.version > result.version) { return; }

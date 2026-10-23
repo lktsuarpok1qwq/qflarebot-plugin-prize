@@ -2,13 +2,14 @@ import type { MessageConfiguration } from './messages/templates/config.js';
 import type { PluginContext } from '@qqbot/sdk';
 import type { OperationReceipt, PointsService } from 'qflarebot-plugin-points';
 
+export const SCHEMA = 12;
 export type Ctx = PluginContext;
 export type Kind = 'POOL';
 export type PoolState = 'DRAFT' | 'ACTIVE' | 'PAUSED' | 'CLOSED' | 'ARCHIVED';
 export type DrawState = 'CREATED' | 'DEBITED' | 'DRAWN' | 'SETTLING' | 'CANCELLING'
     | 'SETTLED' | 'FAILED' | 'REFUNDED' | 'NEEDS_REVIEW';
-export type ClaimState = 'LOCKED' | 'PENDING' | 'CLAIMED' | 'FULFILLED' | 'EXPIRED' | 'CANCELLED';
-export type StockPolicy = 'RETURN' | 'RETIRE';
+export const CLAIM_STATES = ['LOCKED', 'PENDING', 'FULFILLED', 'CANCELLED'] as const;
+export type ClaimState = typeof CLAIM_STATES[number];
 export interface Award {
     id: string;
     name: string;
@@ -17,8 +18,6 @@ export interface Award {
     weight: number;
     reward: number;
     prizeId?: string;
-    claimHours?: number;
-    expiry?: StockPolicy;
 }
 export interface Rules {
     kind: Kind;
@@ -33,12 +32,12 @@ export interface Rules {
     repeat: 'ALLOW' | 'ONCE_PER_POOL';
     awards: Award[];
 }
+export const POOL_FIELDS = ['bot_id', 'id', 'state', 'version', 'rules'] as const;
 export interface Pool {
     bot_id: string;
     id: string;
     state: PoolState;
     version: number;
-    inventory_revision: number;
     rules: string;
 }
 export interface Prize {
@@ -66,6 +65,7 @@ export interface Meta {
     bot_id: string;
     facts_count: number;
     pending_bytes: number;
+    capacity_deferred: number;
     cursor_secret: string;
     data_revision: number;
     schema_version: number;
@@ -80,7 +80,6 @@ export interface Meta {
     lease_until: number;
     maintenance_requested: number;
     archive_requested: number;
-    cleanup_due: number;
     archive_due: number;
     last_error: string | null;
 }
@@ -97,12 +96,10 @@ export type Operation = {
 export interface DrawBody {
     rules?: Rules;
     results?: Award[];
-    inventoryRevision?: number;
     inventoryVersions?: Array<{ id: string; version: number | null }>;
     weights?: Array<{ id: string; weight: number; available: boolean }>;
     ops: Operation[];
     claimId?: string;
-    inventoryConflicts: number;
     manualAttempts?: Record<string, number>;
     priorState?: DrawState;
 }
@@ -134,10 +131,36 @@ export interface Draw {
     expires_at: number;
     error: string | null;
     body: string | null;
+    snapshot: string | null;
+    claim_id: string | null;
+    claim_state: ClaimState | null;
+    claim_stock_state: Claim['stock_state'] | null;
+    claim_prize_id: string | null;
+    claim_award: string | null;
+    claim_award_name: string | null;
+    claim_created_at: number | null;
+    claim_obtained_at: number | null;
+    claim_fulfilled_at: number | null;
+    claim_cancelled_at: number | null;
+    claim_processed_at: number | null;
+    claim_version: number;
+    claim_note: string | null;
+    claim_admin_op: string | null;
+    claim_archive_id: string | null;
+    claim_archive_pending: string | null;
     award_ids: string;
+    pool_name: string;
+    result_name: string | null;
+    result_award_id: string | null;
+    result_prize_id: string | null;
     archive_id: string | null;
     archive_pending: string | null;
+    archive_ready: number;
 }
+export const DRAW_LIST_FIELDS = ['bot_id', 'id', 'short_id', 'user_id', 'scene', 'target', 'event_key', 'kind', 'pool_id',
+    'config_version', 'admission_revision', 'business_day', 'created_at', 'settled_at', 'count', 'cost', 'reward', 'state', 'qualifies', 'winner',
+    'version', 'lease_token', 'lease_until', 'retry_at', 'expires_at', 'error', 'award_ids', 'pool_name', 'result_name', 'result_award_id', 'result_prize_id', 'archive_id', 'archive_pending'] as const;
+export type DrawEvidence = Pick<Draw, typeof DRAW_LIST_FIELDS[number] | 'body' | 'archive_ready'>;
 export interface Claim {
     bot_id: string;
     id: string;
@@ -147,24 +170,25 @@ export interface Claim {
     pool_id: string;
     prize_id: string;
     award: string | null;
+    award_name: string;
+    created_at: number;
+    list_time: number;
     state: ClaimState;
     stock_state: 'RESERVED' | 'RETURNED' | 'FULFILLED' | 'RETIRED';
     obtained_at: number | null;
-    expires_at: number | null;
-    claimed_at: number | null;
     fulfilled_at: number | null;
-    expired_at: number | null;
     cancelled_at: number | null;
     processed_at: number | null;
     version: number;
-    details_version: number;
-    details: string | null;
-    purge_at: number | null;
     note: string | null;
     admin_op: string | null;
     archive_id: string | null;
     archive_pending: string | null;
 }
+export const CLAIM_FIELDS = [
+    'bot_id', 'id', 'short_id', 'draw_id', 'user_id', 'pool_id', 'prize_id', 'award', 'state', 'stock_state',
+    'award_name', 'created_at', 'list_time', 'obtained_at', 'fulfilled_at', 'cancelled_at', 'processed_at', 'version', 'note', 'admin_op', 'archive_id', 'archive_pending'
+] as const satisfies readonly (keyof Claim)[];
 export interface Outcome {
     ok: boolean;
     code: string;

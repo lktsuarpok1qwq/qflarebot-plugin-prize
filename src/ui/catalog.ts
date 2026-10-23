@@ -40,8 +40,10 @@ function renderActivities(tab) {
         return card;
     }));
     $('poolListMessage').textContent = !activityLoaded[tab] ? '尚未加载'
-        : rows.length ? '已加载 ' + rows.length + ' 个活动' + (tab === 'pools' && catalogCursors.pools ? '，还有更多' : '')
+        : rows.length ? ''
             : '暂无奖池，点击新建奖池';
+    $('poolListMessage').hidden = activityLoaded[tab] && rows.length > 0;
+    syncLoadButton('loadPools', activityLoaded[tab], 'newPool');
 }
 
 function updateActivity(pool) {
@@ -51,7 +53,6 @@ function updateActivity(pool) {
 
     state.pools = state.pools.filter(p => p.id !== pool.id).concat(pool).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
     const tab = 'pools';
-    activityLoaded[tab] = true;
     renderActivities(tab);
 }
 
@@ -67,16 +68,20 @@ async function activityRequest(path) {
 async function loadActivities(tab, refresh = false, next = false) {
     if (activityLoaded[tab] && !refresh && !next) { return; }
 
+    if (!next) {
+        catalogCursors.pools = null;
+        $('poolNext').disabled = true;
+    }
+
     const epoch = state.epoch;
     const message = $('poolListMessage');
-    message.textContent = '正在加载…';
 
     try {
         const params = new URLSearchParams({ view: 'pools', kind: 'POOL' });
 
         if (next && catalogCursors.pools) { params.set('cursor', catalogCursors.pools); }
 
-        const result = await activityRequest('/api/pools?' + params);
+        const result = await readRegion('poolList', () => activityRequest('/api/pools?' + params));
 
         if (epoch !== state.epoch) { return; }
 
@@ -93,7 +98,8 @@ async function loadActivities(tab, refresh = false, next = false) {
         activityLoaded[tab] = true;
         renderActivities(tab);
     } catch (error) {
-        message.textContent = '列表未能更新，请点击刷新列表重试';
+        message.hidden = false;
+        message.textContent = activityLoaded[tab] ? '列表未能更新，保留上次结果，请重新加载' : '加载未完成，请重试';
         throw error;
     }
 }
@@ -102,7 +108,10 @@ document.addEventListener('prize:write', () => {
     catalogCursors.pools = null;
     $('poolNext').disabled = true;
 
-    if (activityLoaded.pools) { $('poolListMessage').textContent = '列表可能变化，刷新可查看全部活动'; }
+    if (activityLoaded.pools) {
+        $('poolListMessage').hidden = false;
+        $('poolListMessage').textContent = '列表可能变化，请重新加载';
+    }
 });
 
 $('loadPools').onclick = () => run(() => loadActivities('pools', true));

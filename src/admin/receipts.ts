@@ -1,6 +1,6 @@
 import type { DBStatement } from '@qqbot/sdk';
 import type { Ctx, Outcome } from '../contracts.js';
-import { atomic, canonical, ensure, failure, Fault, isConflict, hash, NOW, sql, text } from '../storage/db.js';
+import { atomic, canonical, ensure, failure, hash, NOW, sql, text } from '../storage/db.js';
 
 export interface AdminRequest {
     operationId: string;
@@ -23,11 +23,13 @@ export interface AdminReceipt {
     archive_pending: string | null;
 }
 
-export async function lookup(ctx: Ctx, id: string): Promise<AdminReceipt | null> {
-    return ctx.db.first<AdminReceipt>('SELECT * FROM {admin_audit} WHERE bot_id=? AND operation_id=?', ctx.botId, id);
+export type ReceiptSummary = Pick<AdminReceipt, 'operation_id' | 'request_hash' | 'action' | 'target' | 'state' | 'outcome'>;
+
+export async function lookup(ctx: Ctx, id: string): Promise<ReceiptSummary | null> {
+    return ctx.db.first<ReceiptSummary>('SELECT operation_id,request_hash,action,target,state,outcome FROM {admin_audit} WHERE bot_id=? AND operation_id=?', ctx.botId, id);
 }
 
-async function identity(ctx: Ctx, request: AdminRequest): Promise<{ digest: string; previous: AdminReceipt | null }> {
+async function identity(ctx: Ctx, request: AdminRequest): Promise<{ digest: string; previous: ReceiptSummary | null }> {
     text(request.operationId, 96);
     ensure(/^[A-Za-z0-9_-]+$/.test(request.operationId));
     text(request.action, 40);
@@ -39,10 +41,10 @@ async function identity(ctx: Ctx, request: AdminRequest): Promise<{ digest: stri
     return { digest, previous };
 }
 
-function insert(ctx: Ctx, request: AdminRequest, digest: string, outcome: Outcome | null): DBStatement {
+function insert(ctx: Ctx, request: AdminRequest, digest: string, outcome: Outcome): DBStatement {
     return sql(`INSERT INTO {admin_audit}(bot_id,operation_id,request_hash,action,target,input,state,outcome,created_at)
         VALUES(?,?,?,?,?,?,?, ?,${NOW})`, ctx.botId, request.operationId, digest, request.action, request.target,
-        canonical(request), outcome ? 'DONE' : 'PENDING', outcome ? JSON.stringify(outcome) : null);
+        canonical(request), 'DONE', JSON.stringify(outcome));
 }
 
 export interface Plan {
@@ -60,7 +62,7 @@ export async function local(ctx: Ctx, request: AdminRequest, plan: () => Promise
 
     try {
         const next = await plan();
-        await atomic(ctx, next.guard, [...next.writes, insert(ctx, request, digest, next.outcome)]);
+        await atomic(ctx, next.guard, [...next.writes, insert(ctx, request, digest, next.outcome)], true);
 
         return next.outcome;
     } catch (error) {
@@ -73,58 +75,12 @@ export async function local(ctx: Ctx, request: AdminRequest, plan: () => Promise
         }
 
         const outcome = failure(error);
-        await ctx.db.run(`INSERT INTO {admin_audit}(bot_id,operation_id,request_hash,action,target,input,state,outcome,created_at)
-            VALUES(?,?,?,?,?,?,'DONE',?,${NOW}) ON CONFLICT(bot_id,operation_id) DO NOTHING`, ctx.botId,
+        const inserted = await ctx.db.first<Pick<ReceiptSummary, 'request_hash' | 'outcome'>>(`INSERT INTO {admin_audit}(bot_id,operation_id,request_hash,action,target,input,state,outcome,created_at)
+            VALUES(?,?,?,?,?,?,'DONE',?,${NOW}) ON CONFLICT(bot_id,operation_id) DO NOTHING RETURNING request_hash,outcome`, ctx.botId,
             request.operationId, digest, request.action, request.target, canonical(request), JSON.stringify(outcome));
-        const actual = await lookup(ctx, request.operationId);
+        const actual = inserted ?? await lookup(ctx, request.operationId);
         ensure(actual?.request_hash === digest, 'OPERATION_CONFLICT');
 
         return JSON.parse(actual.outcome!) as Outcome;
     }
-}
-
-export async function external(ctx: Ctx, request: AdminRequest, perform: () => Promise<Outcome>): Promise<Outcome> {
-    const { digest, previous } = await identity(ctx, request);
-
-    if (previous?.outcome) {
-        return JSON.parse(previous.outcome) as Outcome;
-    }
-
-    if (!previous) {
-        try {
-            await ctx.db.batch([insert(ctx, request, digest, null)]);
-        } catch {
-            const winner = await lookup(ctx, request.operationId);
-            ensure(winner?.request_hash === digest, 'OPERATION_CONFLICT');
-
-            if (winner.outcome) {
-                return JSON.parse(winner.outcome) as Outcome;
-            }
-        }
-    }
-
-    // 跨 Service 的不明结果保留 PENDING，后续仍以同一意图和原资金 ID 核查
-    let result: Outcome;
-
-    try {
-        result = await perform();
-    } catch (error) {
-        const actual = await lookup(ctx, request.operationId);
-
-        if (actual?.outcome) {
-            return JSON.parse(actual.outcome) as Outcome;
-        }
-
-        if (isConflict(error) || error instanceof Fault && ['POINTS_NOT_READY', 'VERIFICATION_REQUIRED', 'INVALID_ARGUMENT', 'ARCHIVE_DISABLED'].includes(error.code)) {
-            result = failure(error);
-        } else {
-            throw error;
-        }
-    }
-
-    await ctx.db.run(`UPDATE {admin_audit} SET state='DONE',outcome=? WHERE bot_id=? AND operation_id=? AND state='PENDING'`,
-        JSON.stringify(result), ctx.botId, request.operationId);
-    const actual = await lookup(ctx, request.operationId);
-
-    return JSON.parse(actual!.outcome!) as Outcome;
 }

@@ -1,74 +1,73 @@
-import type { Award, Claim, Ctx } from './contracts.js';
-import { DAY, MINUTE } from './contracts.js';
-import { atomic, ensure, meta, nextArchiveAt, NOW, settings, sql } from './storage/db.js';
-import { moveStock } from './inventory/stock.js';
-import { recoverOne } from './lottery/recovery.js';
+import type { Ctx, Meta } from './contracts.js';
+import { MINUTE } from './contracts.js';
+import { draw, meta, nextArchiveAt, NOW, settings } from './storage/db.js';
+import { recoverOne, recoveryCandidate } from './lottery/recovery.js';
+import { inspectRecovery } from './points/operations.js';
 import { archiveStep } from './archive/jobs.js';
 
-export async function expireOne(ctx: Ctx): Promise<boolean> {
-    const claim = await ctx.db.first<Claim>(`SELECT * FROM {claims} WHERE bot_id=? AND state='PENDING'
-        AND expires_at<=${NOW} ORDER BY expires_at,id LIMIT 1`, ctx.botId);
+export async function maintenance(ctx: Ctx, initial?: Meta) {
+    const control = initial ?? await meta(ctx);
 
-    if (!claim) { return false; }
+    if (control.lease_until > Date.now()) {
+        return { task: 'busy', error: null, at: Date.now() };
+    }
 
-    const award = JSON.parse(claim.award!) as Award;
-    const mode = award.expiry!;
-    await atomic(ctx, sql(`EXISTS(SELECT 1 FROM {claims} WHERE bot_id=? AND id=? AND version=? AND state='PENDING'
-        AND stock_state='RESERVED' AND expires_at<=${NOW}) AND EXISTS(SELECT 1 FROM {draws} WHERE bot_id=? AND id=? AND state='SETTLED')`,
-        ctx.botId, claim.id, claim.version, ctx.botId, claim.draw_id), [
-        ...moveStock(claim, mode),
-        sql(`UPDATE {claims} SET state='EXPIRED',stock_state=?,expired_at=expires_at,processed_at=${NOW},
-            purge_at=${NOW}+?,version=version+1 WHERE bot_id=? AND id=?`, mode === 'RETURN' ? 'RETURNED' : 'RETIRED',
-            30 * DAY, ctx.botId, claim.id)
-    ]);
+    const recovery = await recoveryCandidate(ctx);
+    const archive = !recovery && settings(control).archiveEnabled
+        && (control.archive_requested || control.archive_due <= Date.now());
 
-    return true;
-}
-
-export async function maintenance(ctx: Ctx, mode: 'auto' | 'check' | 'archive' = 'auto') {
-    const control = await meta(ctx);
-    const token = crypto.randomUUID();
-    const got = await ctx.db.run(`UPDATE {schema_meta} SET lease_token=?,lease_until=${NOW}+120000
-        WHERE bot_id=? AND lease_until<=${NOW}`, token, ctx.botId);
-    ensure(got.changes, 'MAINTENANCE_BUSY');
-    let error: string | null = null;
-    let task = 'check';
-
-    try {
-        if (mode === 'archive') {
-            await archiveStep(ctx);
-            task = 'archive';
-        } else if (mode === 'auto') {
-            // 初始预算每轮只执行一种任务，避免恢复与解析归档共享 CPU 峰值
-            if (await recoverOne(ctx)) {
-                task = 'recovery';
-            } else if (await expireOne(ctx)) {
-                task = 'expiry';
-            } else if (control.cleanup_due <= Date.now()) {
-                await ctx.db.run(`UPDATE {claims} SET details=NULL,details_version=details_version+1 WHERE bot_id=? AND id IN
-                    (SELECT id FROM {claims} WHERE bot_id=? AND details IS NOT NULL AND purge_at<=${NOW}
-                        AND state IN ('FULFILLED','EXPIRED','CANCELLED') ORDER BY purge_at,id LIMIT 5)`, ctx.botId, ctx.botId);
-                await ctx.db.run(`UPDATE {schema_meta} SET cleanup_due=${NOW}+? WHERE bot_id=?`, 60 * MINUTE, ctx.botId);
-                task = 'cleanup';
-            } else if (settings(control).archiveEnabled && (control.archive_requested || control.archive_due <= Date.now())) {
-                const progressed = await archiveStep(ctx);
-                await ctx.db.run(`UPDATE {schema_meta} SET archive_due=${NOW}+? WHERE bot_id=?`, progressed ? 10 * MINUTE : nextArchiveAt(Date.now()) - Date.now(), ctx.botId);
-                task = 'archive';
-            }
+    if (!recovery && !archive) {
+        // 仅确认明确受理的手动请求；空闲 Cron 不写心跳或清除上次故障。
+        if (control.maintenance_requested) {
+            await ctx.db.run(`UPDATE {schema_meta} SET maintenance_requested=0,last_error=NULL
+                WHERE bot_id=? AND version=? AND lease_until<=${NOW} AND maintenance_requested=1`, ctx.botId, control.version);
         }
 
-        const overdue = await ctx.db.first<{ overdue: number }>(`SELECT
-            EXISTS(SELECT 1 FROM {claims} WHERE bot_id=? AND state='PENDING' AND expires_at<${NOW}-1200000)
-            OR EXISTS(SELECT 1 FROM {claims} WHERE bot_id=? AND details IS NOT NULL AND purge_at<${NOW}-7200000) AS overdue`, ctx.botId, ctx.botId);
-        error = overdue?.overdue ? 'MAINTENANCE_BACKLOG' : null;
-        await ctx.db.run(`UPDATE {schema_meta} SET heartbeat=${NOW},last_error=?,maintenance_requested=0,archive_requested=CASE WHEN ?='archive' THEN 0 ELSE archive_requested END WHERE bot_id=? AND lease_token=?`, error, task, ctx.botId, token);
-
-        return { task, error, at: Date.now() };
-    } catch (cause) {
-        error = 'MAINTENANCE_FAILED';
-        await ctx.db.run('UPDATE {schema_meta} SET last_error=? WHERE bot_id=? AND lease_token=?', error, ctx.botId, token);
-        throw cause;
-    } finally {
-        await ctx.db.run('UPDATE {schema_meta} SET lease_token=NULL,lease_until=0 WHERE bot_id=? AND lease_token=?', ctx.botId, token);
+        return { task: 'idle', error: null, at: Date.now() };
     }
+
+    const candidate = recovery ? await draw(ctx, recovery.id) : undefined;
+    const inspection = candidate ? await inspectRecovery(ctx, candidate) : undefined;
+
+    if (inspection?.pending) {
+        return { task: 'recovery', status: 'pending', error: null, at: Date.now() };
+    }
+
+    const token = crypto.randomUUID();
+    const owned = await ctx.db.first<Meta>(`UPDATE {schema_meta} SET lease_token=?,lease_until=${NOW}+120000
+        WHERE bot_id=? AND version=? AND lease_until<=${NOW} RETURNING *`, token, ctx.botId, control.version);
+
+    if (!owned) {
+        return { task: 'busy', error: null, at: Date.now() };
+    }
+
+    const task = recovery ? 'recovery' : 'archive';
+    let failure: unknown;
+    let status: 'progressed' | 'pending' | 'failed' = 'pending';
+    let archiveDue: number | null = null;
+
+    try {
+        if (recovery) {
+            status = await recoverOne(ctx, candidate, inspection);
+        } else {
+            const progressed = await archiveStep(ctx, owned);
+            status = 'progressed';
+            archiveDue = progressed ? Date.now() + 10 * MINUTE : nextArchiveAt(Date.now());
+        }
+    } catch (error) {
+        failure = error;
+        status = 'failed';
+    }
+
+    // 只有完成推进才更新成功状态；待确认保留原故障与请求，失败不伪造成功心跳。
+    await ctx.db.run(`UPDATE {schema_meta} SET heartbeat=CASE WHEN ?='progressed' THEN ${NOW} ELSE heartbeat END,
+        last_error=CASE WHEN ?='failed' THEN 'MAINTENANCE_FAILED' WHEN ?='progressed' THEN NULL ELSE last_error END,
+        maintenance_requested=CASE WHEN ?='progressed' THEN 0 ELSE maintenance_requested END,
+        archive_requested=CASE WHEN ?='archive' AND ?='progressed' THEN 0 ELSE archive_requested END,
+        archive_due=COALESCE(?,archive_due),lease_token=NULL,lease_until=0 WHERE bot_id=? AND lease_token=?`,
+        status, status, status, status, task, status, archiveDue, ctx.botId, token);
+
+    if (failure) { throw failure; }
+
+    return { task, status, error: status === 'failed' ? 'MAINTENANCE_FAILED' : null, at: Date.now() };
 }

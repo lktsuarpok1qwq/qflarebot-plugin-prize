@@ -21,7 +21,7 @@
     },
     {
       "name": "兑奖",
-      "description": "私聊查看中奖记录与申请兑奖",
+      "description": "私聊查看全部中奖记录",
       "scenes": [
         "group",
         "c2c"

@@ -1,104 +1,172 @@
 import { eventKey } from '../storage/events.js';
 import type { Session } from '@qqbot/sdk';
-import type { Ctx, Draw, DrawBody, Kind, Meta, Pool, Rules } from '../contracts.js';
-import { MINUTE, SOURCE } from '../contracts.js';
-import { atomic, beijing, ensure, failure, LIVE, NOW, sql } from '../storage/db.js';
-import { prepareDebit, wallet } from '../points/operations.js';
-import { access } from '../access.js';
+import type { Ctx, Draw, Kind, Meta, Pool, Rules } from '../contracts.js';
+import { MINUTE, SOURCE, SCHEMA, POOL_FIELDS, DRAW_LIST_FIELDS } from '../contracts.js';
+import { atomic, beijing, ensure, failure, LIVE, meta, NOW, settings, splitPayload, sql } from '../storage/db.js';
+import { claimColumns } from '../storage/claims.js';
+import { wallet, accessFailure } from '../points/operations.js';
 import { validateRules } from './rules.js';
+import { prepareResult } from './results.js';
 
-export function capacity(botId: string): { sql: string; params: unknown[] } {
-    return sql(`NOT EXISTS(SELECT 1 FROM {draws} WHERE bot_id=? AND ${LIVE} AND
-            (state='NEEDS_REVIEW' OR expires_at<=${NOW}+1200000 OR (retry_at<=${NOW} AND lease_until<=${NOW})))
-        AND (SELECT COUNT(*) FROM {draws} WHERE bot_id=? AND ${LIVE}) <
-            (SELECT json_extract(settings,'$.maxInflight') FROM {schema_meta} WHERE bot_id=?)
-        AND NOT EXISTS(SELECT 1 FROM {claims} WHERE bot_id=? AND state='PENDING' AND expires_at<${NOW}-1200000)
-        AND NOT EXISTS(SELECT 1 FROM {claims} WHERE bot_id=? AND details IS NOT NULL AND purge_at<${NOW}-7200000)
-        AND EXISTS(SELECT 1 FROM {schema_meta} WHERE bot_id=? AND heartbeat>${NOW}-1200000 AND last_error IS NULL
-            AND facts_count<json_extract(settings,'$.maxFacts') AND pending_bytes<json_extract(settings,'$.maxPendingBytes'))`,
-        botId, botId, botId, botId, botId, botId) as { sql: string; params: unknown[] };
+export function capacity(botId: string, admissionRevision?: number): { sql: string; params: unknown[] } {
+    return sql(`EXISTS(SELECT 1 FROM {schema_meta} m WHERE m.bot_id=? AND m.state='READY' AND m.schema_version=${SCHEMA} AND m.capacity_deferred=0
+        ${admissionRevision === undefined ? '' : 'AND m.admission_enabled=1 AND m.admission_revision=?'}
+        AND m.facts_count<json_extract(m.settings,'$.maxFacts') AND m.pending_bytes<json_extract(m.settings,'$.maxPendingBytes')
+        AND (SELECT COUNT(*) FROM {draws} INDEXED BY {draw_mutex} WHERE bot_id=m.bot_id AND ${LIVE})<json_extract(m.settings,'$.maxInflight')
+        AND NOT EXISTS(SELECT 1 FROM {draws} INDEXED BY {draw_mutex} WHERE bot_id=m.bot_id AND ${LIVE} AND
+            (state='NEEDS_REVIEW' OR expires_at<=${NOW}+1200000 OR (retry_at<=${NOW} AND lease_until<=${NOW}))))`,
+        botId, ...admissionRevision === undefined ? [] : [admissionRevision]) as { sql: string; params: unknown[] };
+}
+
+// 租约凭据只随本次成功准入返回，不从数据库记录推断当前请求的所有权。
+export type Admission = Draw & { ownedLease?: string };
+
+const eventFields = [...new Set([...DRAW_LIST_FIELDS, 'archive_ready', 'snapshot', 'body', ...Object.values(claimColumns)])]
+    .map(field => ['snapshot', 'body', 'claim_award'].includes(field)
+        ? `CASE WHEN state IN ('SETTLED','FAILED','REFUNDED') THEN NULL ELSE ${field} END AS ${field}` : field).join(',');
+
+function eventDraw(ctx: Ctx, key: string): Promise<Draw | null> {
+    return ctx.db.first<Draw>(`SELECT ${eventFields} FROM {draws} WHERE bot_id=? AND event_key=?`, ctx.botId, key);
+}
+
+export function quota(botId: string, poolId: string, userId: string, day: string, rules: Rules) {
+    const { totalLimit: total, userLimit: user, dailyLimit: daily } = rules;
+
+    if (total) {
+        return sql(`(SELECT COUNT(*)<? ${user ? 'AND COALESCE(SUM(user_id=?),0)<?' : ''}
+            ${daily ? 'AND COALESCE(SUM(user_id=? AND business_day=?),0)<?' : ''}
+            FROM (SELECT user_id,business_day FROM {draws} INDEXED BY {draw_quota}
+                WHERE bot_id=? AND pool_id=? AND qualifies=1 LIMIT ?))`,
+            total, ...user ? [userId, user] : [], ...daily ? [userId, day, daily] : [], botId, poolId, total);
+    }
+
+    if (user && daily) {
+        return sql(`(SELECT COUNT(*)<? AND COALESCE(SUM(business_day=?),0)<?
+            FROM (SELECT business_day FROM {draws} INDEXED BY {draw_quota}
+                WHERE bot_id=? AND pool_id=? AND user_id=? AND qualifies=1 LIMIT ?))`, user, day, daily, botId, poolId, userId, user);
+    }
+
+    if (user || daily) {
+        const limit = user || daily;
+
+        return sql(`(SELECT COUNT(*) FROM (SELECT 1 FROM {draws} WHERE bot_id=? AND pool_id=? AND user_id=? AND qualifies=1
+            ${daily ? 'AND business_day=?' : ''} LIMIT ?))<?`, botId, poolId, userId, ...daily ? [day] : [], limit, limit);
+    }
+
+    return null;
 }
 
 export async function admit(ctx: Ctx, session: Session, kind: Kind, poolId: string, count: number,
-    options: { quote?: number; control?: Meta } = {}): Promise<Draw> {
+    options: { control?: Meta; holdLease?: boolean } = {}): Promise<Admission> {
     const key = eventKey(session);
-    const existing = await ctx.db.first<Draw>('SELECT * FROM {draws} WHERE bot_id=? AND event_key=?', ctx.botId, key);
+    const initial = options.control ?? await meta(ctx);
+    const existing = await eventDraw(ctx, key);
 
     if (existing) {
         return existing;
     }
 
-    const control = await access(ctx, options.control);
     const id = crypto.randomUUID();
-    const short = 'D' + id.replaceAll('-', '');
     const created = Date.now();
-    const pool = await ctx.db.first<Pool>('SELECT * FROM {pools} WHERE bot_id=? AND id=?', ctx.botId, poolId);
+    let pool: (Pool & { already_won: number }) | null = null;
     let rules: Rules;
+    let prepared: Awaited<ReturnType<typeof prepareResult>>;
+
+    try {
+        ensure(kind === 'POOL' && count === 1);
+        pool = await ctx.db.first<Pool & { already_won: number }>(`SELECT ${POOL_FIELDS.join(',')},
+            CASE WHEN json_extract(p.rules,'$.repeat')='ONCE_PER_POOL' THEN EXISTS(SELECT 1 FROM {pool_winners} w
+                WHERE w.bot_id=p.bot_id AND w.pool_id=p.id AND w.user_id=?) ELSE 0 END AS already_won
+            FROM {pools} p WHERE bot_id=? AND id=?`, session.userId, ctx.botId, poolId);
+        ensure(pool?.state === 'ACTIVE', 'POOL_CLOSED');
+        rules = validateRules(JSON.parse(pool.rules));
+        ensure(rules.kind === kind);
+        ensure(Date.now() >= rules.starts && Date.now() < rules.ends, 'POOL_CLOSED');
+    } catch (error) {
+        return reject(ctx, session, key, id, created, kind, poolId, failure(error).code);
+    }
+
+    if (settings(initial).paused) {
+        return reject(ctx, session, key, id, created, kind, poolId, 'ADMISSION_CLOSED');
+    }
+
+    if (pool.already_won) { return reject(ctx, session, key, id, created, kind, poolId, 'ADMISSION_LIMIT'); }
+
+    const control = initial;
 
     try {
         ensure(control.admission_enabled === 1, 'ADMISSION_CLOSED');
-        ensure(pool?.state === 'ACTIVE', 'POOL_CLOSED');
-        ensure(options.quote === undefined || pool.version === options.quote, 'QUOTE_CHANGED');
-        rules = validateRules(JSON.parse(pool.rules));
-        ensure(rules.kind === kind && Number.isInteger(count) && count === 1);
-        ensure(created >= rules.starts && created < rules.ends, 'POOL_CLOSED');
-        const check = await wallet(ctx).checkAccounts({ source: SOURCE, userIds: [session.userId] });
-
-        if (!check.ok && ['SOURCE_NOT_REGISTERED', 'SOURCE_DISABLED', 'SOURCE_NOT_ALLOWED'].includes(check.code)) {
-            await ctx.db.run(`UPDATE {schema_meta} SET admission_enabled=0,admission_revision=admission_revision+1,version=version+1
-                WHERE bot_id=?`, ctx.botId);
-        }
-
-        ensure(check.ok, check.ok ? '' : check.code);
-        ensure(check.data.accounts.some(item => item.userId === session.userId && item.exists), 'ACCOUNT_NOT_FOUND');
+        const balance = await wallet(ctx).getBalance({ source: SOURCE, userId: session.userId });
+        ensure(balance.ok, balance.ok ? '' : balance.code);
+        ensure(balance.data.status === 'active', 'ACCOUNT_SUSPENDED');
+        ensure(balance.data.availableMinor >= rules.cost * count, 'INSUFFICIENT_BALANCE');
+        // 余额预检只提前拒绝；实际扣款仍原子校验余额，规则竞争仍由准入守卫拒绝。
+        prepared = await prepareResult(ctx, rules, id, session.userId);
     } catch (error) {
-        return reject(ctx, session, key, id, short, created, kind, poolId, failure(error).code);
+        const code = failure(error).code;
+
+        for (const write of accessFailure(ctx, code)) { await ctx.db.run(write.sql, ...write.params!); }
+
+        return reject(ctx, session, key, id, created, kind, poolId, code);
     }
 
     const cost = rules.cost * count;
-    const payload: DrawBody = { rules, inventoryConflicts: 0, ops: [prepareDebit(id, session.userId, cost)] };
-    const cap = capacity(ctx.botId);
-    const condition = sql(`EXISTS(SELECT 1 FROM {schema_meta} WHERE bot_id=? AND state='READY' AND schema_version=1
-            AND admission_enabled=1 AND admission_revision=?)
-        AND EXISTS(SELECT 1 FROM {pools} WHERE bot_id=? AND id=? AND state='ACTIVE' AND version=?
-            AND json_extract(rules,'$.starts')<=${NOW} AND json_extract(rules,'$.ends')>${NOW}) AND (${cap.sql})
-        AND (?=0 OR (SELECT COUNT(*) FROM {draws} WHERE bot_id=? AND pool_id=? AND qualifies=1)<?)
-        AND (?=0 OR (SELECT COUNT(*) FROM {draws} WHERE bot_id=? AND pool_id=? AND user_id=? AND qualifies=1)<?)
-        AND (?=0 OR (SELECT COUNT(*) FROM {draws} WHERE bot_id=? AND pool_id=? AND user_id=? AND business_day=? AND qualifies=1)<?)
-        AND (?='ALLOW' OR NOT EXISTS(SELECT 1 FROM {draws} WHERE bot_id=? AND pool_id=? AND user_id=? AND winner=1))`,
-        ctx.botId, control.admission_revision, ctx.botId, poolId, pool!.version, ...cap.params,
-        rules.totalLimit, ctx.botId, poolId, rules.totalLimit, rules.userLimit, ctx.botId, poolId, session.userId, rules.userLimit,
-        rules.dailyLimit, ctx.botId, poolId, session.userId, beijing(created), rules.dailyLimit,
-        rules.repeat, ctx.botId, poolId, session.userId);
+    const { payload, result } = prepared;
+    const token = options.holdLease ? crypto.randomUUID() : null;
+    const cap = capacity(ctx.botId, control.admission_revision);
+    const retryAt = token ? created + 10 * MINUTE : 0;
 
-    try {
-        await atomic(ctx, condition, [sql(`INSERT INTO {draws}(bot_id,id,short_id,user_id,scene,target,event_key,kind,pool_id,
-            config_version,admission_revision,business_day,created_at,count,cost,state,qualifies,retry_at,expires_at,body)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'CREATED',1,?,?,?)`, ctx.botId, id, short, session.userId, session.scene,
-            session.targetId, key, kind, poolId, pool!.version, control.admission_revision, beijing(created), created, count, cost,
-            created, created + 60 * MINUTE, JSON.stringify(payload))]);
-    } catch (error) {
-        const found = await ctx.db.first<Draw>('SELECT * FROM {draws} WHERE bot_id=? AND event_key=?', ctx.botId, key);
+    if (token) { payload.ops[0]!.attempts = 1; }
 
-        if (found) {
-            return found;
-        }
+    const stored = splitPayload(payload);
 
-        const current = options.quote !== undefined ? await ctx.db.first<Pool>('SELECT * FROM {pools} WHERE bot_id=? AND id=?', ctx.botId, poolId) : null;
-        const code = current && current.version !== options.quote ? 'QUOTE_CHANGED' : failure(error).code === 'CONFLICT' ? 'ADMISSION_LIMIT' : 'UNAVAILABLE';
+    const checks = [...prepared.checks];
 
-        return reject(ctx, session, key, id, short, created, kind, poolId, code);
+    const participation = quota(ctx.botId, poolId, session.userId, beijing(created), rules);
+
+    if (participation) { checks.push(participation); }
+
+    if (rules.repeat === 'ONCE_PER_POOL') {
+        checks.push(sql('NOT EXISTS(SELECT 1 FROM {pool_winners} WHERE bot_id=? AND pool_id=? AND user_id=?)', ctx.botId, poolId, session.userId));
     }
 
-    return (await ctx.db.first<Draw>('SELECT * FROM {draws} WHERE bot_id=? AND id=?', ctx.botId, id))!;
+    const condition = sql(`(${cap.sql}) AND EXISTS(SELECT 1 FROM {pools} WHERE bot_id=? AND id=? AND state='ACTIVE' AND version=?
+            AND json_extract(rules,'$.starts')<=${NOW} AND json_extract(rules,'$.ends')>${NOW})
+        ${checks.map(check => 'AND (' + check.sql + ')').join(' ')}`,
+        ...cap.params, ctx.botId, poolId, pool!.version, ...checks.flatMap(check => check.params!));
+
+    try {
+        const results = await atomic<Draw>(ctx, condition, [sql(`INSERT INTO {draws}(bot_id,id,user_id,scene,target,event_key,kind,pool_id,
+            config_version,admission_revision,business_day,created_at,count,cost,state,qualifies,retry_at,expires_at,body,pool_name,reward,award_ids,result_name,result_award_id,result_prize_id,lease_token,lease_until,
+            snapshot,claim_id,claim_state,claim_stock_state,claim_prize_id,claim_award,claim_award_name,claim_created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'CREATED',1,?,?,?,?,?,?,?,?,?,?,${token ? NOW + '+120000' : '0'},?,?,?,?,?,?,?,?) RETURNING *`, ctx.botId, id, session.userId, session.scene,
+            session.targetId, key, kind, poolId, pool!.version, control.admission_revision, beijing(created), created, count, cost,
+            retryAt, created + 60 * MINUTE, stored.body, rules.name, result.reward, JSON.stringify([result.id]), result.name, result.id, result.prizeId ?? null, token,
+            stored.snapshot, payload.claimId ?? null, payload.claimId ? 'LOCKED' : null, payload.claimId ? 'RESERVED' : null,
+            result.prizeId ?? null, payload.claimId ? JSON.stringify(result) : null, payload.claimId ? result.name : null, payload.claimId ? created : null), ...prepared.writes], true);
+        const row = results[1]!.results[0];
+        ensure(row, 'ADMISSION_EVIDENCE_MISSING');
+
+        return token ? { ...row, ownedLease: token } : row;
+    } catch (error) {
+        const found = await eventDraw(ctx, key);
+
+        if (found) {
+            return token && found.id === id && found.lease_token === token ? { ...found, ownedLease: token } : found;
+        }
+
+        const code = failure(error).code === 'CONFLICT' ? 'ADMISSION_LIMIT' : 'UNAVAILABLE';
+
+        return reject(ctx, session, key, id, created, kind, poolId, code);
+    }
 }
 
-async function reject(ctx: Ctx, session: Session, key: string, id: string, short: string, created: number,
+async function reject(ctx: Ctx, session: Session, key: string, id: string, created: number,
     kind: Kind, poolId: string, code: string): Promise<Draw> {
-    await ctx.db.run(`INSERT INTO {draws}(bot_id,id,short_id,user_id,scene,target,event_key,kind,pool_id,config_version,
-        admission_revision,business_day,created_at,count,cost,state,error) VALUES(?,?,?,?,?,?,?,?,?,0,0,?,?,0,0,'FAILED',?)
-        ON CONFLICT(bot_id,event_key) DO NOTHING`, ctx.botId, id, short, session.userId, session.scene, session.targetId,
+    const inserted = await ctx.db.first<Draw>(`INSERT INTO {draws}(bot_id,id,user_id,scene,target,event_key,kind,pool_id,config_version,
+        admission_revision,business_day,created_at,count,cost,state,error) VALUES(?,?,?,?,?,?,?,?,0,0,?,?,0,0,'FAILED',?)
+        ON CONFLICT(bot_id,event_key) DO NOTHING RETURNING *`, ctx.botId, id, session.userId, session.scene, session.targetId,
         key, kind, poolId, beijing(created), created, code);
 
-    return (await ctx.db.first<Draw>('SELECT * FROM {draws} WHERE bot_id=? AND event_key=?', ctx.botId, key))!;
+    return inserted ?? (await eventDraw(ctx, key))!;
 }

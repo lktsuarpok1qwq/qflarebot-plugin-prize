@@ -39,8 +39,6 @@ export function validateRules(value: unknown): Rules {
         if (award.type === 'PHYSICAL' || award.type === 'VIRTUAL_MANUAL') {
             ensure(v.kind === 'POOL' && award.reward === 0);
             identifier(award.prizeId);
-            integer(award.claimHours, 1, 24 * 365);
-            ensure(award.expiry === 'RETURN' || award.expiry === 'RETIRE');
         } else {
             ensure(award.prizeId === undefined);
         }

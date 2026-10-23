@@ -1,36 +1,37 @@
+import type { DBStatement } from '@qqbot/sdk';
 import type { Ctx, Draw } from '../contracts.js';
-import { SOURCE } from '../contracts.js';
+import type { Admission } from './admission.js';
+import { MINUTE, SOURCE } from '../contracts.js';
 import { body, draw, ensure, lease, LIVE, NOW, save } from '../storage/db.js';
-import { operation } from '../points/operations.js';
+import { inspectRecovery, operation } from '../points/operations.js';
+import type { OperationProof, RecoveryInspection } from '../points/operations.js';
 import { activation, rollbackClaim } from '../inventory/stock.js';
-import { fixResult } from './results.js';
 
-async function review(ctx: Ctx, row: Draw, code: string): Promise<Draw> {
-    const payload = body(row);
+async function review(ctx: Ctx, row: Draw, code: string, payload = body(row), extra: DBStatement[] = []): Promise<Draw> {
     payload.priorState = row.state;
 
-    return save(ctx, row, { state: 'NEEDS_REVIEW', error: code }, payload);
+    return save(ctx, row, { state: 'NEEDS_REVIEW', error: code }, payload, extra);
 }
 
-async function settled(ctx: Ctx, row: Draw): Promise<Draw> {
-    const payload = body(row);
+async function settled(ctx: Ctx, row: Draw, payload = body(row), extra: DBStatement[] = []): Promise<Draw> {
     const debit = payload.ops.find(op => op.method === 'burn');
     const reward = payload.ops.find(op => op.method === 'credit');
     ensure(debit?.outcome === 'COMMITTED' && debit.receipt && payload.results, 'POINTS_EVIDENCE_CONFLICT');
     ensure(row.reward === 0 ? !reward : reward?.outcome === 'COMMITTED' && reward.receipt, 'POINTS_EVIDENCE_CONFLICT');
     ensure(!payload.ops.some(op => op.method === 'reverseOwn'), 'POINTS_EVIDENCE_CONFLICT');
-    // 完成时间以最后一笔已确认资金写入为准，恢复不会延长兑奖期限。
+    // 完成时间以最后一笔已确认资金写入为准，恢复不会改写获得时间。
     const at = Math.max(debit.receipt.committedAtMs, reward?.receipt?.committedAtMs ?? 0);
 
-    const claim = activation(row, at);
+    const claim = activation(row, at, payload);
 
     return save(ctx, row, {
-        state: 'SETTLED', error: null, settled_at: at,
+        ...claim.patch,
+        state: 'SETTLED', error: null, retry_at: 0, settled_at: at,
         winner: payload.results.some(a => a.reward > 0 || a.prizeId) ? 1 : 0
-    }, undefined, claim.writes, claim.condition);
+    }, payload, [...claim.writes, ...extra], claim.condition);
 }
 
-async function cancellation(ctx: Ctx, row: Draw): Promise<Draw> {
+async function cancellation(ctx: Ctx, row: Draw, proof?: OperationProof): Promise<Draw> {
     const payload = body(row);
     const debit = payload.ops.find(op => op.method === 'burn');
     const reward = payload.ops.find(op => op.method === 'credit');
@@ -48,26 +49,50 @@ async function cancellation(ctx: Ctx, row: Draw): Promise<Draw> {
             }
         });
         // operation 在调用前连同 attempts 一并持久化完整退款输入。
-        row = { ...row, body: JSON.stringify(payload) };
     }
 
-    const result = await operation(ctx, row, index);
+    const result = await operation(ctx, row, index, async (current, confirmed, extra) => {
+        if (confirmed.ops[index]!.outcome === 'REJECTED') { return review(ctx, current, 'REFUND_REJECTED', confirmed, extra); }
 
-    if (result.unknown) { return result.row; }
+        const release = await rollbackClaim(ctx, current);
 
-    if (result.op.outcome === 'REJECTED') {
-        return review(ctx, result.row, 'REFUND_REJECTED');
-    }
+        return save(ctx, current, { ...release.patch, state: 'REFUNDED', qualifies: 0, retry_at: 0 }, confirmed, [...release.writes, ...extra], release.condition);
+    }, false, proof, payload);
 
-    return save(ctx, result.row, { state: 'REFUNDED', qualifies: 0 }, undefined, await rollbackClaim(ctx, result.row));
+    return result.row;
 }
 
-export async function advance(ctx: Ctx, id: string, stages = 2): Promise<Draw> {
-    let row = await lease(ctx, id);
+export async function advance(ctx: Ctx, input: string | Admission, stages = 2, inspected?: RecoveryInspection): Promise<Draw> {
+    const id = typeof input === 'string' ? input : input.id;
+
+    if (typeof input !== 'string' && ['SETTLED', 'FAILED', 'REFUNDED'].includes(input.state)) { return input; }
+
+    const owned = typeof input !== 'string' && input.ownedLease && input.ownedLease === input.lease_token;
+    let proof: OperationProof | undefined;
+
+    if (!owned) {
+        const existing = typeof input === 'string' ? await draw(ctx, id) : input;
+
+        if (['SETTLED', 'FAILED', 'REFUNDED'].includes(existing.state) || existing.lease_until > Date.now()) { return existing; }
+
+        const inspection = inspected?.rowId === existing.id && inspected.version === existing.version
+            ? inspected : await inspectRecovery(ctx, existing);
+
+        if (inspection.pending) { return existing; }
+
+        proof = inspection.proof;
+    }
+
+    let row = owned ? { ...input as Admission } : await lease(ctx, id);
 
     if (!row) { return draw(ctx, id); }
 
     const token = row.lease_token;
+    let preparedIndex = typeof input !== 'string' && input.ownedLease === token && row.state === 'CREATED' ? 0 : -1;
+
+    if (typeof input !== 'string') { delete input.ownedLease; }
+
+    delete (row as Admission).ownedLease;
 
     try {
         if (row.kind !== 'POOL' || row.count !== 1) {
@@ -75,42 +100,65 @@ export async function advance(ctx: Ctx, id: string, stages = 2): Promise<Draw> {
         }
 
         // 不重写已持久化的其它资金配方；保留证据交由管理员核查。
-        if (body(row).ops.some(op => !['burn', 'credit', 'reverseOwn'].includes(op.method))) {
+        const preparedPayload = body(row);
+
+        if (preparedPayload.ops.some(op => !['burn', 'credit', 'reverseOwn'].includes(op.method))) {
             return row.state === 'NEEDS_REVIEW' ? row : await review(ctx, row, 'POINTS_INPUT_UNSUPPORTED');
         }
 
+        const prepared = preparedPayload.results;
+        ensure(prepared?.length === 1 && prepared[0]!.id === row.result_award_id && prepared[0]!.name === row.result_name
+            && prepared[0]!.reward === row.reward && (prepared[0]!.prizeId ?? null) === row.result_prize_id
+            && (!prepared[0]!.prizeId || preparedPayload.claimId), 'RESULT_EVIDENCE_MISSING');
+
         for (let step = 0; step < stages; step++) {
             if (row.state === 'CREATED') {
-                ensure(body(row).ops[0]?.method === 'burn', 'DEBIT_INPUT_MISSING');
-                const result = await operation(ctx, row, 0);
+                const payload = step === 0 ? preparedPayload : body(row);
+                ensure(payload.ops[0]?.method === 'burn', 'DEBIT_INPUT_MISSING');
+                const result = await operation(ctx, row, 0, async (current, confirmed, extra) => {
+                    if (confirmed.ops[0]!.outcome === 'COMMITTED') {
+                        if (current.reward === 0) { return settled(ctx, current, confirmed, extra); }
+
+                        const credit = confirmed.ops.findIndex(op => op.method === 'credit');
+                        ensure(credit > 0, 'REWARD_INPUT_MISSING');
+
+                        if (step + 1 < stages && confirmed.ops[credit]!.attempts === 0) {
+                            confirmed.ops[credit]!.attempts = 1;
+                            const next = await save(ctx, current, { state: 'SETTLING', retry_at: Date.now() + 10 * MINUTE }, confirmed, extra);
+                            preparedIndex = credit;
+
+                            return next;
+                        }
+
+                        return save(ctx, current, { state: 'DEBITED', retry_at: 0 }, confirmed, extra);
+                    }
+
+                    const release = await rollbackClaim(ctx, current);
+
+                    return save(ctx, current, { ...release.patch, state: 'FAILED', qualifies: 0, retry_at: 0, error: confirmed.ops[0]!.error ?? 'DEBIT_REJECTED' },
+                        confirmed, [...release.writes, ...extra], release.condition);
+                }, preparedIndex === 0, proof, payload);
                 row = result.row;
 
                 if (result.unknown) { break; }
+            } else if (row.state === 'DEBITED' || row.state === 'DRAWN' || row.state === 'SETTLING') {
+                const payload = step === 0 ? preparedPayload : body(row);
+                ensure(payload.ops[0]?.outcome === 'COMMITTED' && payload.ops[0]?.receipt, 'POINTS_EVIDENCE_CONFLICT');
 
-                if (row.state === 'CREATED') {
-                    row = result.op.outcome === 'COMMITTED' ? await save(ctx, row, { state: 'DEBITED' })
-                        : await save(ctx, row, { state: 'FAILED', qualifies: 0, error: result.op.error ?? 'DEBIT_REJECTED' });
-                }
-            } else if (row.state === 'DEBITED') {
-                row = await fixResult(ctx, row);
-
-                if (row.state === 'DEBITED') { break; }
-            } else if (row.state === 'DRAWN' || row.state === 'SETTLING') {
                 if (row.reward === 0) {
-                    row = await settled(ctx, row);
+                    row = await settled(ctx, row, payload);
                 } else {
-                    const index = body(row).ops.findIndex(op => op.method === 'credit');
+                    const index = payload.ops.findIndex(op => op.method === 'credit');
                     ensure(index >= 0, 'REWARD_INPUT_MISSING');
-                    const result = await operation(ctx, row, index);
+                    const result = await operation(ctx, row, index, (current, payload, extra) => payload.ops[index]!.outcome === 'COMMITTED'
+                        ? settled(ctx, current, payload, extra)
+                        : save(ctx, current, { state: 'CANCELLING', retry_at: 0, error: payload.ops[index]!.error ?? 'REWARD_REJECTED' }, payload, extra), preparedIndex === index, proof, payload);
                     row = result.row;
 
                     if (result.unknown) { break; }
-
-                    row = result.op.outcome === 'COMMITTED' ? await settled(ctx, row)
-                        : await save(ctx, row, { state: 'CANCELLING', error: result.op.error ?? 'REWARD_REJECTED' });
                 }
             } else if (row.state === 'CANCELLING') {
-                row = await cancellation(ctx, row);
+                row = await cancellation(ctx, row, proof);
                 break;
             } else {
                 break;
@@ -121,26 +169,42 @@ export async function advance(ctx: Ctx, id: string, stages = 2): Promise<Draw> {
 
         return row;
     } catch (error) {
-        const current = await draw(ctx, id);
+        row = await draw(ctx, id);
 
-        if (current.lease_token === token && current.state !== 'NEEDS_REVIEW' && !['SETTLED', 'FAILED', 'REFUNDED'].includes(current.state)
+        if (row.lease_token === token && row.state !== 'NEEDS_REVIEW' && !['SETTLED', 'FAILED', 'REFUNDED'].includes(row.state)
             && /EVIDENCE|MISSING|CONTRACT/.test(String(error))) {
-            return review(ctx, current, 'RECOVERY_EVIDENCE_REQUIRED');
+            row = await review(ctx, row, 'RECOVERY_EVIDENCE_REQUIRED');
         }
 
-        return current;
+        return row;
     } finally {
-        await ctx.db.run('UPDATE {draws} SET lease_token=NULL,lease_until=0 WHERE bot_id=? AND id=? AND lease_token=?', ctx.botId, id, token);
+        if (row.lease_token === token) {
+            await ctx.db.run('UPDATE {draws} SET lease_token=NULL,lease_until=0 WHERE bot_id=? AND id=? AND lease_token=?', ctx.botId, id, token);
+        }
     }
 }
 
-export async function recoverOne(ctx: Ctx): Promise<boolean> {
-    const row = await ctx.db.first<Draw>(`SELECT * FROM {draws} WHERE bot_id=? AND ${LIVE} AND state<>'NEEDS_REVIEW'
+export async function recoveryCandidate(ctx: Ctx): Promise<Pick<Draw, 'id'> | null> {
+    return ctx.db.first<Pick<Draw, 'id'>>(`SELECT id FROM {draws} INDEXED BY {draw_mutex} WHERE bot_id=? AND ${LIVE} AND state<>'NEEDS_REVIEW'
         AND retry_at<=${NOW} AND lease_until<=${NOW} ORDER BY expires_at,retry_at,id LIMIT 1`, ctx.botId);
+}
 
-    if (!row) { return false; }
+export async function recoverOne(ctx: Ctx, candidate?: Draw, inspection?: RecoveryInspection): Promise<'progressed' | 'pending' | 'failed'> {
+    const id = candidate?.id ?? (await recoveryCandidate(ctx))?.id;
 
-    await advance(ctx, row.id, 1);
+    if (!id) { return 'pending'; }
 
-    return true;
+    const before = candidate ?? await draw(ctx, id);
+
+    if (['SETTLED', 'FAILED', 'REFUNDED'].includes(before.state)) { return 'pending'; }
+
+    const after = await advance(ctx, before, 1, inspection);
+
+    if (after.state === 'NEEDS_REVIEW') { return 'failed'; }
+
+    // 尝试次数与租约版本变化不是成功；未知调用必须继续保留待确认状态。
+    const confirmed = (row: Draw) => body(row).ops.filter(op => op.outcome).length;
+
+    return after.state !== before.state && ['SETTLED', 'FAILED', 'REFUNDED', 'DEBITED', 'CANCELLING'].includes(after.state)
+        || confirmed(after) > confirmed(before) ? 'progressed' : 'pending';
 }

@@ -104,7 +104,17 @@ export function createMarkdown(safeHttpUrl: (value: unknown) => value is string,
 
         let lineStart = 0, previous = '';
 
-        for (const line of source.split('\n')) {
+        const lines = source.split('\n');
+        const following = new Array<string>(lines.length);
+        let upcoming = '';
+
+        for (let index = lines.length - 1; index >= 0; index--) {
+            following[index] = upcoming;
+
+            if (lines[index]!.trim()) { upcoming = lines[index]!; }
+        }
+
+        for (const [index, line] of lines.entries()) {
             const currentStart = lineStart;
             const content = (text: string) => inline(text, currentStart + line.length - text.length);
             lineStart += line.length + 1;
@@ -134,6 +144,14 @@ export function createMarkdown(safeHttpUrl: (value: unknown) => value is string,
             if (stack.length && line.trim() && indent >= stack.at(-1)!.indent + 4) {
                 html += '<div>' + inline(line.trim(), currentStart + line.length - line.trimStart().length) + '</div>';
                 continue;
+            }
+
+            if (!line.trim() && stack.length) {
+                const next = following[index]!;
+                const nextList = /^( *)(?:[-*]|\d+\.)\s+/.exec(next);
+
+                if (nextList && (stack.some(level => level.indent === nextList[1]!.length) || nextList[1]!.length >= stack.at(-1)!.indent + 4)
+                    || next.trim() && /^ */.exec(next)![0].length >= stack.at(-1)!.indent + 4) { continue; }
             }
 
             while (stack.length) { close(); }

@@ -64,7 +64,9 @@ function renderStockCards() {
         return card;
     }));
     $('stockListMessage').textContent = !stockLoaded ? '尚未加载完整列表' : state.prizes.length
-        ? '已加载 ' + state.prizes.length + ' 个商品' + (stockCursor ? '，还有更多' : '') : '暂无商品，点击新建商品';
+        ? '' : '暂无商品，点击新建商品';
+    $('stockListMessage').hidden = stockLoaded && state.prizes.length > 0;
+    syncLoadButton('loadStock', stockLoaded, 'newStock');
 }
 
 function updateStock(p, observedRead = stockReadGeneration) {
@@ -85,16 +87,19 @@ function updateStock(p, observedRead = stockReadGeneration) {
     ruleEditors.forEach(editor => editor.refreshProducts());
 }
 
-async function loadCatalog(view = 'prizes', next = false) {
+async function loadCatalog(view = 'prizes', next = false, region = 'stockList') {
     const epoch = state.epoch;
     const params = new URLSearchParams({ view });
 
     if (next && stockCursor) { params.set('cursor', stockCursor); }
 
-    $('stockListMessage').textContent = '正在加载…';
+    if (!next) {
+        stockCursor = null;
+        $('stockNext').disabled = true;
+    }
 
     try {
-        const result = await activityRequest('/api/pools?' + params);
+        const result = await readRegion(region, () => activityRequest('/api/pools?' + params));
 
         if (epoch !== state.epoch) { return; }
 
@@ -113,7 +118,8 @@ async function loadCatalog(view = 'prizes', next = false) {
         renderStockCards();
         ruleEditors.forEach(editor => editor.refreshProducts());
     } catch (error) {
-        $('stockListMessage').textContent = '列表未能更新，请点击刷新列表重试';
+        $('stockListMessage').hidden = false;
+        $('stockListMessage').textContent = stockLoaded ? '列表未能更新，保留上次结果，请重新加载' : '加载未完成，请重试';
         throw error;
     }
 }
@@ -235,6 +241,9 @@ document.addEventListener('prize:write', event => {
     stockCursor = null;
     $('stockNext').disabled = true;
 
-    if (stockLoaded) { $('stockListMessage').textContent = '列表可能变化，刷新可查看全部商品'; }
+    if (stockLoaded) {
+        $('stockListMessage').hidden = false;
+        $('stockListMessage').textContent = '列表可能变化，请重新加载';
+    }
 });
 `;

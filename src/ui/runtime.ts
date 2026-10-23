@@ -68,6 +68,9 @@ function confirm(message) {
 
 function message(code) {
     return ({
+        INSUFFICIENT_BALANCE: '积分不足', POOL_CLOSED: '奖池未开放', ADMISSION_LIMIT: '参与资格或库存不足',
+        ADMISSION_CLOSED: '购买已暂停', ACCOUNT_NOT_FOUND: '积分账户不存在', NOT_FOUND: '未找到对应记录',
+        SOURCE_NOT_REGISTERED: 'Points 来源尚未登记', SOURCE_DISABLED: 'Points 来源已停用', SOURCE_NOT_ALLOWED: 'Points 授权不足',
         CURSOR_EXPIRED: '列表已变化，请重新查询', CURSOR_INVALID: '翻页标识无效，请重新查询', CONFLICT: '记录版本已变化，请重新加载并保留草稿',
         INVALID_ARGUMENT: '请检查输入内容与范围', POINTS_NOT_READY: '请先在 Points 启用来源并配置完整权限',
         ARCHIVE_DISABLED: '请先开启 R2 归档设置', QUERY_WORK_LIMIT: '工作量超过上限，请缩小查询范围', QUERY_RANGE: '请选择最多31天的有效时段',
@@ -91,6 +94,49 @@ async function api(path, init) {
     return result;
 }
 
+async function readRegion(id, task) {
+    const region = $(id), display = region.style.display;
+    const skeleton = node('div', undefined, 'loading-skeleton');
+    const layout = id === 'reply-controls' ? 'editor' : ['poolList', 'stockList'].includes(id) ? 'cards' : 'rows';
+    skeleton.dataset.layout = layout;
+    skeleton.setAttribute('role', 'status');
+    skeleton.setAttribute('aria-label', '正在加载');
+    skeleton.append(...Array.from({ length: layout === 'rows' ? 3 : 2 }, () => node('div', undefined, 'skeleton-row')));
+    region.before(skeleton);
+    region.style.display = 'none';
+    region.setAttribute('aria-busy', 'true');
+
+    try { return await task(); } finally {
+        skeleton.remove();
+        region.style.display = display;
+        region.setAttribute('aria-busy', 'false');
+    }
+}
+
+let fieldSerial = 0;
+
+function fieldError(input, message) {
+    if (!input.id) { input.id = 'prize-field-' + ++fieldSerial; }
+
+    const id = input.id + '-error';
+    let error = $(id);
+
+    if (!error) {
+        error = node('span', undefined, 'field-error');
+        error.id = id;
+        input.after(error);
+    }
+
+    error.textContent = message || '';
+    error.hidden = !message;
+    input.setAttribute('aria-invalid', String(!!message));
+    const descriptions = (input.getAttribute('aria-describedby') || '').split(/\s+/).filter(value => value && value !== id);
+
+    if (message) { descriptions.push(id); }
+
+    if (descriptions.length) { input.setAttribute('aria-describedby', descriptions.join(' ')); } else { input.removeAttribute('aria-describedby'); }
+}
+
 function showPending() {
     const p = state.pending;
     $('pending').hidden = !p;
@@ -111,6 +157,8 @@ function invalidate() {
     state.draw = null;
     $('claimDetail').hidden = true;
     $('drawDetail').hidden = true;
+    $('recoveryPanel').hidden = true;
+    $('recoveryEmpty').hidden = false;
 }
 
 async function run(task) {
@@ -122,10 +170,10 @@ async function run(task) {
     try { await task(); } catch (error) { toast(error.message, 'error'); } finally {
         setBusy(false);
 
-        const focus = state.focusAfter || origin;
+        const requested = state.focusAfter, focus = requested || origin;
         state.focusAfter = null;
 
-        if (document.activeElement === document.body && focus?.isConnected && !focus.disabled) {
+        if ((document.activeElement === document.body || requested && document.activeElement === origin) && focus?.isConnected && !focus.disabled) {
             focus.focus({ preventScroll: true });
         }
     }
@@ -207,7 +255,6 @@ function finishPending(result) {
     state.pending = null;
     showPending();
     state.epoch++;
-    $('admission').textContent = '请刷新状态';
     document.dispatchEvent(new CustomEvent('prize:write', { detail: { action: p.request.action } }));
 }
 
@@ -241,6 +288,14 @@ function node(tag, text, className) {
     if (className) { element.className = className; }
 
     return element;
+}
+
+function syncLoadButton(id, loaded, createId) {
+    const control = $(id);
+    control.querySelector('[data-load-label]').textContent = loaded ? '重新加载' : control.dataset.initialLabel;
+    control.classList.toggle('primary', !loaded);
+
+    if (createId) { $(createId).classList.toggle('primary', loaded); }
 }
 
 function button(label, handler) {

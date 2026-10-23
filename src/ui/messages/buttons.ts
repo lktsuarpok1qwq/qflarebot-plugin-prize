@@ -1,7 +1,7 @@
 export const messageButtons = String.raw`
 function createMessageButtons(current, changed) {
     let controls = [];
-    const actions = { command: '自定义命令', link: '打开链接', continue: '原购买结果', next: '原列表翻页', pool: '查看奖池', records: '购买记录', prizes: '我的奖品', history: '兑奖记录', buy: '购买一次', claim: '申请领取', details: '填写资料', account: '积分开户' };
+    const actions = { command: '自定义命令', link: '打开链接', next: '原列表翻页', pool: '查看奖池', records: '购买记录', prizes: '我的奖品', buy: '购买一次', account: '积分开户' };
     const make = (tag, value, cls) => node(tag, value, cls);
     const field = (name, input) => {
         const label = make('label', name);
@@ -33,6 +33,7 @@ function createMessageButtons(current, changed) {
 
         const rows = model.draft.buttons[model.key];
         const register = (input, row, item, name) => {
+            input.id = 'reply-button-' + row + '-' + item + '-' + name;
             controls.push({ input, row, item, name });
 
             return input;
@@ -87,7 +88,7 @@ function createMessageButtons(current, changed) {
                     if (item.action === 'link') { item.data = 'https://'; } else {
                         if (item.action === 'command') { item.data = ''; }
 
-                        item.enter = item.action !== 'details';
+                        item.enter = true;
                     }
 
                     draw(item);
@@ -97,6 +98,13 @@ function createMessageButtons(current, changed) {
 
                 if (protectedAction) { actionField.append(make('span', '原业务参数由程序生成，保留此功能', 'muted')); } else if (!['command', 'link'].includes(item.action)) {
                     actionField.append(make('span', '自动携带实际命令和当前对象，仅条件满足时显示', 'muted'));
+                }
+
+                const hint = actionField.querySelector('span');
+
+                if (hint) {
+                    hint.id = action.id + '-hint';
+                    action.setAttribute('aria-describedby', hint.id);
                 }
 
                 grid.append(actionField);
@@ -119,7 +127,6 @@ function createMessageButtons(current, changed) {
                         enter.append(o);
                     });
                     enter.value = String(item.enter);
-                    enter.disabled = item.action === 'details';
                     enter.onchange = () => {
                         item.enter = enter.value === 'true';
                         changed();
@@ -190,7 +197,7 @@ function createMessageButtons(current, changed) {
     }
 
     function validate(error) {
-        controls.forEach(c => c.input.setAttribute('aria-invalid', String(error?.row === c.row && error?.item === c.item && error?.control === c.name)));
+        controls.forEach(c => fieldError(c.input, error?.row === c.row && error?.item === c.item && error?.control === c.name ? error.message : ''));
 
         return controls.find(c => error?.row === c.row && error?.item === c.item && error?.control === c.name)?.input;
     }

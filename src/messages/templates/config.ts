@@ -1,19 +1,21 @@
-import { ACTION_LABELS, FIELDS, MODULES, WORDS } from './fields.js';
+import { ACTION_LABELS, AWARD_ICONS, FIELDS, MODULES, WORDS } from './fields.js';
 import type { MessageModule } from './fields.js';
 
-export interface MessageButton { label: string; action: 'command' | 'link' | 'continue' | 'next' | 'pool' | 'records' | 'prizes' | 'history' | 'buy' | 'claim' | 'details' | 'account'; data?: string; enter?: boolean; }
-export interface MessageConfiguration { replies: Record<string, string>; buttons: Record<string, MessageButton[][]>; words: Record<string, string>; }
-export interface TemplateError { field: string; target: 'text' | 'buttons' | 'words'; message: string; start: number; end: number; row?: number; item?: number; control?: string; }
+export interface MessageButton { label: string; action: 'command' | 'link' | 'next' | 'pool' | 'records' | 'prizes' | 'buy' | 'account'; data?: string; enter?: boolean; }
+export interface MessageConfiguration { replies: Record<string, string>; buttons: Record<string, MessageButton[][]>; words: Record<string, string>; separators?: Record<string, string>; icons?: Record<string, string>; }
+export interface TemplateError { field: string; target: 'text' | 'buttons' | 'words' | 'separator' | 'icon'; message: string; start: number; end: number; row?: number; item?: number; control?: string; }
 
 export const DEFAULTS: Record<MessageModule, MessageConfiguration> = Object.fromEntries(MODULES.map(module => [module, {
     replies: Object.fromEntries(Object.entries(FIELDS[module]).map(([key, value]) => [key, value.text])),
     buttons: Object.fromEntries(Object.entries(FIELDS[module]).filter(([, field]) => !field.fragment).map(([key, field]) => [key,
-        (field.defaultActions ?? field.actions)?.length ? [(field.defaultActions ?? field.actions)!.map(action => ({ action, label: ACTION_LABELS[action], enter: action !== 'details' }))] : []])),
+        (field.defaultActions ?? field.actions)?.length ? [(field.defaultActions ?? field.actions)!.map(action => ({ action, label: ACTION_LABELS[action], enter: true }))] : []])),
     words: module === 'common' ? Object.fromEntries(Object.entries(WORDS).map(([key, field]) => [key, field.text])) : {}
 }])) as Record<MessageModule, MessageConfiguration>;
 
-export function createTemplateTools(fields: typeof FIELDS, words: typeof WORDS) {
-    const FIELDS = fields, WORDS = words;
+DEFAULTS.prize.buttons.list!.flat().find(item => item.action === 'prizes')!.label = '刷新';
+
+export function createTemplateTools(fields: typeof FIELDS, words: typeof WORDS, icons: typeof AWARD_ICONS) {
+    const FIELDS = fields, WORDS = words, ICONS = icons;
 
     function templateError(value: unknown, variables: readonly string[], required: readonly string[] = []): { message: string; start: number; end: number } | null {
         if (typeof value !== 'string' || new TextEncoder().encode(value).length > 4000) { return { message: '正文最多4000字节', start: 0, end: 0 }; }
@@ -54,12 +56,36 @@ export function createTemplateTools(fields: typeof FIELDS, words: typeof WORDS) 
         const problem = (field: string, target: TemplateError['target'], message: string): TemplateError => ({ field, target, message, start: 0, end: 0 });
         const keys = Object.keys(FIELDS[module]), messages = keys.filter(key => !FIELDS[module][key]!.fragment);
 
-        if (!exact(value, ['replies', 'buttons', 'words']) || !exact(value.replies, keys) || !exact(value.buttons, messages)
+        const properties = ['replies', 'buttons', 'words', ...['separators', 'icons'].filter(key => value && typeof value === 'object' && Object.hasOwn(value, key))];
+
+        if (!exact(value, properties) || !exact(value.replies, keys) || !exact(value.buttons, messages)
             || !exact(value.words, module === 'common' ? Object.keys(WORDS) : [])) { return problem(keys[0]!, 'text', '请提交本模块的完整模板配置'); }
 
         const config = value as unknown as MessageConfiguration;
 
         if (new TextEncoder().encode(JSON.stringify(config)).length > 16000) { return problem(keys[0]!, 'text', '本模块模板配置最多16000字节'); }
+
+        if (config.separators !== undefined) {
+            if (!config.separators || typeof config.separators !== 'object' || Array.isArray(config.separators)) { return problem(keys[0]!, 'separator', '项目间隔配置无效'); }
+
+            for (const [key, source] of Object.entries(config.separators)) {
+                if (FIELDS[module][key]?.fragment?.separator === undefined) { return problem(keys[0]!, 'separator', '项目间隔不适用于此分支'); }
+
+                const error = templateError(source, []);
+
+                if (error) { return { field: key, target: 'separator', ...error }; }
+            }
+        }
+
+        if (config.icons !== undefined) {
+            if (module !== 'pool' || !config.icons || typeof config.icons !== 'object' || Array.isArray(config.icons)) { return problem(keys[0]!, 'icon', '奖项图标配置无效'); }
+
+            for (const [type, icon] of Object.entries(config.icons)) {
+                if (!Object.hasOwn(ICONS, type) || typeof icon !== 'string' || new TextEncoder().encode(icon).length > 80 || /[{}\u0000-\u001f]/.test(icon)) {
+                    return { ...problem('probabilityItem', 'icon', '图标可留空，或填写最多80字节的单行文字，不使用变量'), control: type };
+                }
+            }
+        }
 
         for (const key of keys.filter(key => selected === undefined || key === selected)) {
             const field = FIELDS[module][key]!;
@@ -87,8 +113,6 @@ export function createTemplateTools(fields: typeof FIELDS, words: typeof WORDS) 
                     if (button.action === 'link') {
                         if (!safeHttpUrl(button.data) || button.enter !== undefined) { return fail('请填写 HTTP 或 HTTPS 链接', 'data'); }
                     } else {
-                        if (button.action === 'details' && button.enter !== false) { return fail('填写资料只能填入输入框', 'enter'); }
-
                         if (typeof button.enter !== 'boolean') { return fail('请选择点击方式', 'enter'); }
 
                         if (button.action === 'command' ? typeof button.data !== 'string' || !button.data.trim() || new TextEncoder().encode(button.data).length > 300 || /[\u0000-\u001f{}]/.test(button.data) : button.data !== undefined) { return fail('命令为单行固定文字，原业务参数由程序生成', 'data'); }
@@ -97,7 +121,7 @@ export function createTemplateTools(fields: typeof FIELDS, words: typeof WORDS) 
             }
 
             for (const action of field.requiredActions ?? []) {
-                if (rows.flat().filter(button => button.action === action).length !== 1) { return problem(key, 'buttons', '请保留且仅保留一个' + (action === 'continue' ? '原购买结果' : '原列表翻页') + '按钮'); }
+                if (rows.flat().filter(button => button.action === action).length !== 1) { return problem(key, 'buttons', '请保留且仅保留一个原列表翻页按钮'); }
             }
         }
 
@@ -138,7 +162,13 @@ export function createTemplateTools(fields: typeof FIELDS, words: typeof WORDS) 
         } catch { return false; }
     }
 
-    return { templateError, configurationError, safeHttpUrl, renderTemplate, escapeMarkdown, commandUrl, safeCommandUrl };
+    function awardIcon(config: MessageConfiguration, type: string): string {
+        if (!Object.hasOwn(ICONS, type)) { throw new Error('AWARD_TYPE_INVALID'); }
+
+        return config.icons?.[type] ?? ICONS[type]!.text;
+    }
+
+    return { awardIcon, templateError, configurationError, safeHttpUrl, renderTemplate, escapeMarkdown, commandUrl, safeCommandUrl };
 }
 
-export const { templateError, configurationError, safeHttpUrl, renderTemplate, escapeMarkdown, commandUrl, safeCommandUrl } = createTemplateTools(FIELDS, WORDS);
+export const { awardIcon, templateError, configurationError, safeHttpUrl, renderTemplate, escapeMarkdown, commandUrl, safeCommandUrl } = createTemplateTools(FIELDS, WORDS, AWARD_ICONS);

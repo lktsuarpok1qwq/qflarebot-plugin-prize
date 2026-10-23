@@ -1,8 +1,9 @@
 import type { Route, RouteInput } from '@qqbot/sdk';
-import type { Claim, Draw } from '../contracts.js';
-import { ensure, failure, integer, meta, settings, text } from '../storage/db.js';
+import type { Claim, Draw, Meta } from '../contracts.js';
+import { CLAIM_FIELDS } from '../contracts.js';
+import { ensure, failure, integer, LIVE, settings, text } from '../storage/db.js';
 import { ready } from '../storage/schema.js';
-import { access, requiredPermissions } from '../access.js';
+import { access, requiredPermissions, requiredReadPermissions } from '../access.js';
 import { catalog, page } from '../storage/pages.js';
 import type { Filters } from '../storage/pages.js';
 import { manage } from './service.js';
@@ -15,6 +16,7 @@ import type { StatisticsQuery } from '../archive/statistics.js';
 import { maintenance } from '../maintenance.js';
 import { loadEditorTemplates, moduleName } from '../messages/templates/settings.js';
 import { html } from '../ui/page.js';
+import { labels } from './labels.js';
 
 function json(value: unknown, status = 200): Response {
     return new Response(JSON.stringify(value), {
@@ -25,15 +27,15 @@ function json(value: unknown, status = 200): Response {
     });
 }
 
-function route(method: Route['method'], path: string, handler: (input: RouteInput) => Promise<Response>): Route {
+function route(method: Route['method'], path: string, handler: (input: RouteInput & { control?: Meta }) => Promise<Response>): Route {
     return {
         method, path, auth: 'admin', handler: async input => {
             if (!input.authenticated) { return json({ ok: false, code: 'UNAUTHORIZED' }, 401); }
 
             try {
-                if (path.startsWith('/api/')) { await ready(input.ctx, path !== '/api/state'); }
+                const control = path.startsWith('/api/') ? await ready(input.ctx, path !== '/api/state') : undefined;
 
-                return await handler(input);
+                return await handler({ ...input, control });
             } catch (error) { return json(failure(error), 400); }
         }
     };
@@ -93,23 +95,26 @@ function filters(url: URL): Filters {
 
 export const routes: Route[] = [
     route('GET', '/ui/', async () => new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } })),
-    route('GET', '/api/state', async ({ ctx }) => {
-        const control = await access(ctx);
+    route('GET', '/api/state', async ({ ctx, control: initial }) => {
+        const control = await access(ctx, initial);
         const queue = await ctx.db.all<{ state: string; count: number; earliest: number }>(`SELECT state,COUNT(*) AS count,MIN(expires_at) AS earliest
-            FROM {draws} WHERE bot_id=? AND state NOT IN ('SETTLED','FAILED','REFUNDED') GROUP BY state`, ctx.botId);
+            FROM {draws} INDEXED BY {draw_mutex} WHERE bot_id=? AND ${LIVE} GROUP BY state`, ctx.botId);
 
         return json({
             ok: true, data: {
                 version: control.version, admission: !!control.admission_enabled,
-                missingPermissions: requiredPermissions.filter(name => !control.policy || !(JSON.parse(control.policy).operationPermissions ?? []).includes(name)),
+                missingPermissions: [
+                    ...requiredPermissions.filter(name => !control.policy || !(JSON.parse(control.policy).operationPermissions ?? []).includes(name)),
+                    ...requiredReadPermissions.filter(name => !control.policy || !(JSON.parse(control.policy).readPermissions ?? []).includes(name))
+                ],
                 admissionRevision: control.admission_revision, policy: control.policy ? JSON.parse(control.policy) : null,
-                settings: settings(control), heartbeat: control.heartbeat, cleanupDue: control.cleanup_due,
+                settings: settings(control), heartbeat: control.heartbeat,
                 archiveDue: control.archive_due, error: control.last_error, facts: control.facts_count, logicalBytes: control.pending_bytes, queue
             }
         });
     }),
-    route('GET', '/api/messages/:module', async ({ ctx, params }) => json({ ok: true, data: await loadEditorTemplates(ctx, moduleName(params.module)) })),
-    route('GET', '/api/pools', async ({ ctx, request }) => {
+    route('GET', '/api/messages/:module', async ({ ctx, params, control }) => json({ ok: true, data: await loadEditorTemplates(ctx, moduleName(params.module), control) })),
+    route('GET', '/api/pools', async ({ ctx, request, control }) => {
         const url = new URL(request.url);
         const view = url.searchParams.get('view') ?? 'all';
         ensure(['all', 'pools', 'prizes'].includes(view));
@@ -120,28 +125,39 @@ export const routes: Route[] = [
         for (const table of ['pools', 'prizes'] as const) {
             if (view !== 'all' && view !== table) { continue; }
 
-            const result = await catalog(ctx, table, url.searchParams.get('cursor') ?? undefined, kind ?? undefined);
+            const result = await catalog(ctx, table, url.searchParams.get('cursor') ?? undefined, kind ?? undefined, control);
             data[table] = result.rows;
             data[table + 'Next'] = result.next;
         }
 
         return json({ ok: true, data });
     }),
-    ...(['draws', 'claims'] as const).map(table => route('GET', '/api/' + table, async ({ ctx, request }) => {
+    ...(['draws', 'claims'] as const).map(table => route('GET', '/api/' + table, async ({ ctx, request, control }) => {
         const url = new URL(request.url);
-        const result = await page(ctx, table, filters(url), 20, url.searchParams.get('cursor') ?? undefined);
+        const result = await page(ctx, table, filters(url), 20, url.searchParams.get('cursor') ?? undefined, control);
+        const draws = result.rows.filter((row): row is Draw & { list_time: number } => 'settled_at' in row);
+        const names = await labels(ctx, draws.filter(row => !row.pool_name).map(row => row.pool_id));
         const rows = result.rows.map(row => {
-            if ('details' in row) { return { ...row, details: null, award: null, awardName: row.award ? (JSON.parse(row.award) as { name: string }).name : null, hasDetails: !!row.details }; }
+            if ('obtained_at' in row) { return { ...row, award: null, awardName: row.award_name }; }
 
-            return { ...row, body: null };
+            return {
+                ...row, body: null, poolName: row.pool_name || names.pools[row.pool_id]?.name || null,
+                goodsNames: row.result_prize_id && row.result_name ? [row.result_name] : null
+            };
         });
 
         return json({ ok: true, data: { ...result, rows } });
     })),
-    route('GET', '/api/detail/:table/:id', async ({ ctx, params }) => {
+    route('GET', '/api/detail/:table/:id', async ({ ctx, params, request }) => {
         const table = params.table;
         ensure(table === 'draws' || table === 'claims');
-        const row = await ctx.db.first<Draw | Claim>(`SELECT * FROM {${table}} WHERE bot_id=? AND id=?`, ctx.botId, params.id);
+        const id = text(params.id, 96);
+        const publicId = table === 'draws' && /^D[0-9a-f]{32}$/i.test(id) ? id.slice(1).replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, '$1-$2-$3-$4-$5').toLowerCase() : null;
+        const ids = publicId ? [id, publicId] : [id];
+        const rejected = new URL(request.url).searchParams.get('rejected') === '1';
+        ensure(!rejected || table === 'draws');
+        const row = await ctx.db.first<Draw | Claim>(`SELECT ${table === 'claims' ? CLAIM_FIELDS.join(',') : '*'} FROM {${table}} WHERE bot_id=?
+            AND id IN (${ids.map(() => '?').join(',')})${rejected ? " AND count=0 AND state='FAILED'" : ''} ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END LIMIT 1`, ctx.botId, ...ids, id);
         ensure(row, 'NOT_FOUND');
         const full = await archived(ctx, table, row);
 
@@ -157,7 +173,7 @@ export const routes: Route[] = [
             } : null
         });
     }),
-    route('POST', '/api/manage', async ({ ctx, request }) => {
+    route('POST', '/api/manage', async ({ ctx, request, control }) => {
         const value = await inputBody(request);
         const operation = value as unknown as AdminRequest;
         ensure(typeof operation.action === 'string' && typeof operation.target === 'string' && operation.params
@@ -165,14 +181,14 @@ export const routes: Route[] = [
         let outcome;
 
         if (operation.action === 'maintenance' || operation.action === 'archive') {
+            ensure(control, 'SCHEMA_NOT_READY');
             let newlyAccepted = false;
             outcome = await local(ctx, operation, async () => {
-                const control = await meta(ctx);
                 ensure(operation.action !== 'archive' || settings(control).archiveEnabled, 'ARCHIVE_DISABLED');
                 newlyAccepted = true;
 
                 return {
-                    guard: { sql: "EXISTS(SELECT 1 FROM {schema_meta} WHERE bot_id=? AND state='READY')", params: [ctx.botId] },
+                    guard: { sql: "EXISTS(SELECT 1 FROM {schema_meta} WHERE bot_id=? AND state='READY' AND version=?)", params: [ctx.botId, control.version] },
                     writes: [{ sql: `UPDATE {schema_meta} SET ${operation.action === 'archive' ? 'archive_requested' : 'maintenance_requested'}=1 WHERE bot_id=?`, params: [ctx.botId] }],
                     outcome: { ok: true, code: 'MAINTENANCE_ACCEPTED', target: operation.target, state: 'QUEUED' }
                 };
@@ -183,7 +199,7 @@ export const routes: Route[] = [
                 try { await maintenance(ctx); } catch { /* 维护状态中保留故障与待处理标记 */ }
             }
         } else {
-            outcome = await manage(ctx, operation);
+            outcome = await manage(ctx, operation, control);
         }
 
         return json({ operationId: operation.operationId, action: operation.action, target: operation.target, ...outcome });
@@ -192,16 +208,16 @@ export const routes: Route[] = [
         ok: true,
         data: await statistics(ctx, await inputBody(request) as unknown as StatisticsQuery)
     })),
-    route('GET', '/api/archives', async ({ ctx, request }) => json({
+    route('GET', '/api/archives', async ({ ctx, request, control }) => json({
         ok: true,
-        data: await catalog(ctx, 'archive_batches', new URL(request.url).searchParams.get('cursor') ?? undefined)
+        data: await catalog(ctx, 'archive_batches', new URL(request.url).searchParams.get('cursor') ?? undefined, undefined, control)
     })),
-    route('GET', '/api/operations', async ({ ctx, request }) => json({
+    route('GET', '/api/operations', async ({ ctx, request, control }) => json({
         ok: true,
-        data: await catalog(ctx, 'admin_audit', new URL(request.url).searchParams.get('cursor') ?? undefined)
+        data: await catalog(ctx, 'admin_audit', new URL(request.url).searchParams.get('cursor') ?? undefined, undefined, control)
     })),
     route('GET', '/api/archives/:id', async ({ ctx, params }) => {
-        const batch = await ctx.db.first<Batch>("SELECT * FROM {archive_batches} WHERE bot_id=? AND id=? AND state IN ('COMMITTED','COMPACTED')", ctx.botId, params.id);
+        const batch = await ctx.db.first<Pick<Batch, 'id' | 'object_key' | 'content_hash' | 'bytes'>>("SELECT id,object_key,content_hash,bytes FROM {archive_batches} WHERE bot_id=? AND id=? AND state IN ('COMMITTED','COMPACTED')", ctx.botId, params.id);
         ensure(batch, 'NOT_FOUND');
 
         return json({ ok: true, data: await readObject(ctx, batch) });

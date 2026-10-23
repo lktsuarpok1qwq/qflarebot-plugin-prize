@@ -1,8 +1,9 @@
 import type { DBStatement } from '@qqbot/sdk';
-import type { Ctx, Draw, DrawBody, Meta, Outcome, Settings } from '../contracts.js';
+import { DRAW_LIST_FIELDS, SCHEMA } from '../contracts.js';
+import type { Ctx, Draw, DrawBody, DrawEvidence, Meta, Outcome, Settings } from '../contracts.js';
 
 export const NOW = "CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)";
-export const LIVE = "state NOT IN ('SETTLED','FAILED','REFUNDED')";
+export const LIVE = "qualifies=1 AND settled_at IS NULL AND state NOT IN ('SETTLED','FAILED','REFUNDED')";
 export class Fault extends Error {
     constructor(readonly code: string) {
         super(code);
@@ -19,13 +20,12 @@ export function sql(sql: string, ...params: unknown[]): DBStatement {
     return { sql, params };
 }
 
-export async function atomic(ctx: Ctx, condition: DBStatement, writes: DBStatement[]): Promise<void> {
-    const token = crypto.randomUUID();
-    await ctx.db.batch([
-        sql(`INSERT INTO {guards}(id,ok) SELECT ?,CASE WHEN (${condition.sql}) THEN 1 ELSE 0 END`, token, ...condition.params ?? []),
+export async function atomic<T = unknown>(ctx: Ctx, condition: DBStatement, writes: DBStatement[], tracked = false) {
+    return ctx.db.batch<T>([
+        // 成功不写守卫；失败或未知条件触发 CHECK，后续语句随整个事务回滚。
+        sql(`INSERT INTO {guards}(id,ok) SELECT ?,0 WHERE NOT COALESCE((${condition.sql}),0)`, ctx.botId, ...condition.params ?? []),
         ...writes,
-        sql('UPDATE {schema_meta} SET data_revision=data_revision+1 WHERE bot_id=?', ctx.botId),
-        sql('DELETE FROM {guards} WHERE id=?', token)
+        ...tracked ? [] : [sql('UPDATE {schema_meta} SET data_revision=data_revision+1 WHERE bot_id=?', ctx.botId)]
     ]);
 }
 
@@ -45,7 +45,7 @@ export async function meta(ctx: Ctx): Promise<Meta> {
     }
 
     ensure(row, 'SCHEMA_NOT_READY');
-    ensure(row.schema_version === 1, 'SCHEMA_UNSUPPORTED');
+    ensure(row.schema_version === SCHEMA && row.capacity_deferred === 0, 'SCHEMA_UNSUPPORTED');
     ensure(row.state !== 'INITIALIZING' && row.state !== 'VERIFYING', 'SCHEMA_INITIALIZING');
     ensure(row.state === 'READY', 'SCHEMA_UNSUPPORTED');
 
@@ -70,39 +70,95 @@ export async function draw(ctx: Ctx, id: string): Promise<Draw> {
 }
 
 export function body(row: Draw): DrawBody {
-    ensure(row.body, 'ARCHIVED');
+    ensure(row.body && row.snapshot, 'ARCHIVED');
+    const fixed = JSON.parse(row.snapshot) as DrawBody;
+    const progress = JSON.parse(row.body) as Pick<DrawBody, 'ops' | 'manualAttempts' | 'priorState'>;
+    ensure(Array.isArray(fixed.ops) && Array.isArray(progress.ops) && fixed.ops.length === progress.ops.length, 'POINTS_EVIDENCE_MISSING');
+    ensure(Object.keys(progress).every(key => ['ops', 'manualAttempts', 'priorState'].includes(key)), 'POINTS_EVIDENCE_CONFLICT');
+    ensure(progress.ops.every(item => !('method' in item) && !('input' in item)), 'POINTS_EVIDENCE_CONFLICT');
 
-    return JSON.parse(row.body) as DrawBody;
+    return { ...fixed, ...progress, ops: fixed.ops.map((recipe, index) => ({ ...recipe, ...progress.ops[index]! })) };
+}
+
+export function splitPayload(payload: DrawBody): { snapshot: string; body: string } {
+    const { ops, manualAttempts, priorState, ...fixed } = payload;
+
+    return {
+        snapshot: JSON.stringify({ ...fixed, ops: ops.map(({ method, input }) => ({ method, input })) }),
+        body: JSON.stringify({
+            ops: ops.map(({ method: _method, input: _input, ...progress }) => progress),
+            ...manualAttempts !== undefined ? { manualAttempts } : {}, ...priorState !== undefined ? { priorState } : {}
+        })
+    };
+}
+
+export function progressPatch(row: Draw, payload: DrawBody): Pick<Draw, 'snapshot' | 'body'> {
+    ensure(row.snapshot, 'POINTS_EVIDENCE_MISSING');
+    const fixed = JSON.parse(row.snapshot) as DrawBody;
+    ensure(payload.ops.length >= fixed.ops.length && payload.ops.length <= fixed.ops.length + 1, 'POINTS_EVIDENCE_CONFLICT');
+    ensure(fixed.ops.every((recipe, index) => canonical(recipe) === canonical({ method: payload.ops[index]!.method, input: payload.ops[index]!.input })), 'POINTS_EVIDENCE_CONFLICT');
+    let snapshot = row.snapshot;
+
+    if (payload.ops.length > fixed.ops.length) {
+        const added = payload.ops.at(-1)!;
+        ensure(row.state === 'CANCELLING' && added.method === 'reverseOwn' && added.input.operationId === row.id + ':refund'
+            && !fixed.ops.some(op => op.method === 'reverseOwn'), 'POINTS_EVIDENCE_CONFLICT');
+        snapshot = JSON.stringify({ ...fixed, ops: payload.ops.map(({ method, input }) => ({ method, input })) });
+    }
+
+    const { ops, manualAttempts, priorState } = payload;
+
+    return {
+        snapshot, body: JSON.stringify({
+            ops: ops.map(({ method: _method, input: _input, ...progress }) => progress),
+            ...manualAttempts !== undefined ? { manualAttempts } : {}, ...priorState !== undefined ? { priorState } : {}
+        })
+    };
+}
+
+export function drawEvidence(row: Draw): DrawEvidence {
+    return {
+        ...Object.fromEntries([...DRAW_LIST_FIELDS, 'archive_ready'].map(key => [key, row[key as keyof Draw]])),
+        body: row.body ? JSON.stringify(body(row)) : null
+    } as DrawEvidence;
 }
 
 export function patchDraw(row: Draw, patch: Partial<Draw>, payload?: DrawBody): DBStatement {
-    const next = { ...row, ...patch };
+    const values = { ...patch, ...(payload ? progressPatch(row, payload) : {}) };
+    const allowed: Array<keyof Draw> = ['state', 'retry_at', 'expires_at', 'error', 'snapshot', 'body', 'reward', 'winner', 'qualifies', 'settled_at', 'award_ids', 'result_name', 'result_award_id', 'result_prize_id', 'lease_token', 'lease_until', 'archive_ready',
+        'claim_state', 'claim_stock_state', 'claim_obtained_at', 'claim_fulfilled_at', 'claim_cancelled_at', 'claim_processed_at', 'claim_version', 'claim_note', 'claim_admin_op'];
+    const keys = allowed.filter(key => key in values && values[key] !== row[key]);
 
-    return sql(`UPDATE {draws} SET state=?,version=version+1,retry_at=?,expires_at=?,error=?,body=?,
-        reward=?,winner=?,qualifies=?,settled_at=?,award_ids=? WHERE bot_id=? AND id=?`,
-        next.state, next.retry_at, next.expires_at, next.error, payload ? JSON.stringify(payload) : next.body,
-        next.reward, next.winner, next.qualifies, next.settled_at, next.award_ids, row.bot_id, row.id);
+    return sql(`UPDATE {draws} SET version=version+1${keys.map(key => ',' + key + '=' + (key === 'claim_processed_at' ? NOW : '?')).join('')} WHERE bot_id=? AND id=?`,
+        ...keys.filter(key => key !== 'claim_processed_at').map(key => values[key]), row.bot_id, row.id);
 }
 
-export function fence(row: Draw): DBStatement {
-    return sql(`EXISTS(SELECT 1 FROM {draws} WHERE bot_id=? AND id=? AND version=? AND lease_token=? AND lease_until>${NOW})`,
-        row.bot_id, row.id, row.version, row.lease_token);
+export function fence(row: Draw, condition?: DBStatement): DBStatement {
+    return sql(`EXISTS(SELECT 1 FROM {draws} WHERE bot_id=? AND id=? AND version=? AND lease_token=? AND lease_until>${NOW}${condition ? ' AND (' + condition.sql + ')' : ''})`,
+        row.bot_id, row.id, row.version, row.lease_token, ...condition?.params ?? []);
 }
 
 export async function save(ctx: Ctx, row: Draw, patch: Partial<Draw>, payload?: DrawBody, extra: DBStatement[] = [], condition?: DBStatement): Promise<Draw> {
-    const write = patchDraw(row, patch, payload);
+    const terminal = patch.state && ['SETTLED', 'FAILED', 'REFUNDED'].includes(patch.state);
+    const next = {
+        ...patch, ...payload ? progressPatch(row, payload) : {},
+        ...terminal ? {
+            archive_ready: patch.state === 'SETTLED' && (patch.result_prize_id ?? row.result_prize_id) ? 0 : 1,
+            lease_token: null, lease_until: 0
+        } : {}
+    };
+    const write = patchDraw(row, next);
 
     if (extra.length) {
-        const guard = fence(row);
-        await atomic(ctx, condition ? sql(`(${guard.sql}) AND (${condition.sql})`, ...guard.params!, ...condition.params ?? []) : guard, [write, ...extra]);
+        await atomic(ctx, fence(row, condition), [write, ...extra], true);
     } else {
         // 只有一行更新时直接使用带 fencing 条件的原子 UPDATE，无需额外守卫事务
-        const result = await ctx.db.run(write.sql + ` AND version=? AND lease_token=? AND lease_until>${NOW}`,
-            ...write.params!, row.version, row.lease_token);
+        const result = await ctx.db.run(write.sql + ` AND version=? AND lease_token=? AND lease_until>${NOW}${condition ? ' AND (' + condition.sql + ')' : ''}`,
+            ...write.params!, row.version, row.lease_token, ...condition?.params ?? []);
         ensure(result.changes > 0, 'CONFLICT');
     }
 
-    return { ...row, ...patch, version: row.version + 1, body: payload ? JSON.stringify(payload) : patch.body ?? row.body };
+    return { ...row, ...next, version: row.version + 1 };
 }
 
 export async function lease(ctx: Ctx, id: string): Promise<Draw | null> {
