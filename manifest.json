@@ -1,0 +1,120 @@
+{
+  "name": "prize",
+  "version": "1.0.0",
+  "apiVersion": 4,
+  "permissions": [
+    "db",
+    "admin"
+  ],
+  "depends": {
+    "points.wallet": "*"
+  },
+  "conflicts": [],
+  "commands": [
+    {
+      "name": "抽奖",
+      "description": "查看奖池、抽奖、奖项及本人记录",
+      "scenes": [
+        "group",
+        "c2c"
+      ]
+    },
+    {
+      "name": "兑奖",
+      "description": "私聊查看全部中奖记录",
+      "scenes": [
+        "group",
+        "c2c"
+      ]
+    }
+  ],
+  "regex": [],
+  "events": [],
+  "buttons": [],
+  "cron": [
+    {
+      "name": "prize-maintenance",
+      "cron": "*/10 * * * *"
+    }
+  ],
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/ui/",
+      "auth": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/state",
+      "auth": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/messages/:module",
+      "auth": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/pools",
+      "auth": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/draws",
+      "auth": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/claims",
+      "auth": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/detail/:table/:id",
+      "auth": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/operations/:id",
+      "auth": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/manage",
+      "auth": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/api/statistics",
+      "auth": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/archives",
+      "auth": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/operations",
+      "auth": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/api/archives/:id",
+      "auth": "admin"
+    }
+  ],
+  "hasMiddleware": false,
+  "services": [],
+  "durableObjects": [],
+  "displayName": "奖品中心",
+  "description": "多奖池与私聊奖品中心",
+  "configSchema": {
+    "type": "object",
+    "properties": {}
+  },
+  "ui": {
+    "path": "/ui/",
+    "title": "奖品中心"
+  }
+}

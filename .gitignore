@@ -1,0 +1,8 @@
+/dev/
+/node_modules/
+/dist/
+/.wrangler/
+AGENTS.md
+.agents/
+.vscode/
+*.tsbuildinfo

@@ -1,0 +1,9 @@
+{
+    "name": "qflarebot-plugin-prize",
+    "version": "1.0.0",
+    "description": "多奖池与私聊奖品中心",
+    "license": "MIT",
+    "type": "module",
+    "keywords": ["qflarebot-plugin"],
+    "scripts": {"build": "qqbot-plugin build --cwd ."}
+}
